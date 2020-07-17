@@ -93,7 +93,7 @@ if host_machine.system() == 'android'
 		dep_egl,
 		dep_vulkan,
 	]
-elif host_machine.system() == 'windows'
+elif host_machine.system() == 'windows' or host_machine.system().contains('mingw')
 	dep_gl = dependency('gl', required: false)
 
 	with_win = true
