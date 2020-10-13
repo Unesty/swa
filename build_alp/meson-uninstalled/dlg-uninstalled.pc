@@ -1,8 +1,0 @@
-prefix=/mnt/sda5/home/kitty/Downloads/swa/build_alp
-srcdir=/mnt/sda5/home/kitty/Downloads/swa
-
-Name: dlg
-Description: C/C++ logging and debug library
-Version: 0.2.2
-Libs: -L${prefix}/subprojects/dlg -ldlg -pthread
-Cflags: -I${prefix}/subprojects/dlg -I${srcdir}/subprojects/dlg -I${prefix}/subprojects/dlg/include -I${srcdir}/subprojects/dlg/include -pthread

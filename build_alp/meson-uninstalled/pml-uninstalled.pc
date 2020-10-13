@@ -1,9 +1,0 @@
-prefix=/mnt/sda5/home/kitty/Downloads/swa/build_alp
-srcdir=/mnt/sda5/home/kitty/Downloads/swa
-
-Name: pml
-Description: Simple POSIX mainloop for C
-URL: https://github.com/nyorain/pml
-Version: 0.1.0
-Libs: -L${prefix}/subprojects/pml -lpml
-Cflags: -I${prefix}/subprojects/pml -I${srcdir}/subprojects/pml
