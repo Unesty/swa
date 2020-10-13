@@ -1,8 +1,10 @@
+#define VOLK_IMPLEMENTATION
+#include <volk.h>
 #include <swa/swa.h>
 #include <swa/key.h>
 #include <dlg/dlg.h>
 #include <string.h>
-#include <vulkan/vulkan.h>
+//#include <vulkan/vulkan.h>
 #include <time.h>
 #include <signal.h>
 
@@ -57,9 +59,12 @@ static void cleanup(struct state* state);
 
 // window callbacks
 static bool run = true;
-// struct timespec last_redraw;
+struct timespec last_redraw;
+struct timespec now;
+float ms;
 
 static void window_draw(struct swa_window* win) {
+
 	struct state* state = swa_window_get_userdata(win);
 	dlg_info("Redrawing");
 	VkResult res;
@@ -69,14 +74,21 @@ static void window_draw(struct swa_window* win) {
 		return;
 	}
 
-	// struct timespec now;
-	// timespec_get(&now, TIME_UTC);
-	// float ms = (now.tv_nsec - last_redraw.tv_nsec) / (1000.f * 1000.f);
-	// ms += 1000.f * (now.tv_sec - last_redraw.tv_sec);
-	// dlg_info("Time between redraws: %f", ms);
-	// last_redraw = now;
+	timespec_get(&now, TIME_UTC);
+	ms = (now.tv_nsec - last_redraw.tv_nsec) / (1000.f * 1000.f);
+	ms += 1000.f * (now.tv_sec - last_redraw.tv_sec);
+	dlg_info("Time between redraws: %f", ms);
+	timespec_get(&now, TIME_UTC);
+	last_redraw = now;
 
-	vkDeviceWaitIdle(state->device);
+	//vkDeviceWaitIdle(state->device); // why so slow?
+
+	timespec_get(&now, TIME_UTC);
+	ms = (now.tv_nsec - last_redraw.tv_nsec) / (1000.f * 1000.f);
+	ms += 1000.f * (now.tv_sec - last_redraw.tv_sec);
+	dlg_info("vkDeviceWaitIdle time: %f", ms);
+	timespec_get(&now, TIME_UTC);
+	last_redraw = now;
 
 	// acquire image
 	// we treat suboptimal as success here
@@ -94,6 +106,14 @@ static void window_draw(struct swa_window* win) {
 		return;
 	}
 
+	timespec_get(&now, TIME_UTC);
+	ms = (now.tv_nsec - last_redraw.tv_nsec) / (1000.f * 1000.f);
+	ms += 1000.f * (now.tv_sec - last_redraw.tv_sec);
+	dlg_info("acquire image time: %f", ms);
+	timespec_get(&now, TIME_UTC);
+	last_redraw = now;
+
+
 	// submit render commands
 	VkPipelineStageFlags stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
@@ -106,7 +126,6 @@ static void window_draw(struct swa_window* win) {
 	si.pWaitDstStageMask = &stage;
 	si.signalSemaphoreCount = 1u;
 	si.pSignalSemaphores = &state->render_sem;
-
 	res = vkQueueSubmit(state->qs.gfx, 1, &si, VK_NULL_HANDLE);
 	if(res != VK_SUCCESS) {
 		vk_error(res, "vkQueueSubmit");
@@ -114,7 +133,21 @@ static void window_draw(struct swa_window* win) {
 		return;
 	}
 
+	timespec_get(&now, TIME_UTC);
+	ms = (now.tv_nsec - last_redraw.tv_nsec) / (1000.f * 1000.f);
+	ms += 1000.f * (now.tv_sec - last_redraw.tv_sec);
+	dlg_info("vkQueueSubmit time: %f", ms);
+	timespec_get(&now, TIME_UTC);
+	last_redraw = now;
+
 	swa_window_surface_frame(win);
+
+	timespec_get(&now, TIME_UTC);
+	ms = (now.tv_nsec - last_redraw.tv_nsec) / (1000.f * 1000.f);
+	ms += 1000.f * (now.tv_sec - last_redraw.tv_sec);
+	dlg_info("swa_window_surface_frame time: %f", ms);
+	timespec_get(&now, TIME_UTC);
+	last_redraw = now;
 
 	// present
 	VkPresentInfoKHR present_info = {0};
@@ -137,7 +170,22 @@ static void window_draw(struct swa_window* win) {
 		return;
 	}
 
+	timespec_get(&now, TIME_UTC);
+	ms = (now.tv_nsec - last_redraw.tv_nsec) / (1000.f * 1000.f);
+	ms += 1000.f * (now.tv_sec - last_redraw.tv_sec);
+	dlg_info("vkQueuePresentKHR time: %f", ms);
+	timespec_get(&now, TIME_UTC);
+	last_redraw = now;
+
+
 	swa_window_refresh(win);
+
+	timespec_get(&now, TIME_UTC);
+	ms = (now.tv_nsec - last_redraw.tv_nsec) / (1000.f * 1000.f);
+	ms += 1000.f * (now.tv_sec - last_redraw.tv_sec);
+	dlg_info("swa_window_refresh time: %f", ms);
+	timespec_get(&now, TIME_UTC);
+	last_redraw = now;
 }
 
 static void window_close(struct swa_window* win) {
@@ -313,7 +361,7 @@ int main() {
 	}
 
 	swa_window_set_userdata(win, &state);
-	// timespec_get(&last_redraw, TIME_UTC);
+	timespec_get(&last_redraw, TIME_UTC);
 
 	// main loop
 	while(run) {
@@ -574,6 +622,7 @@ end_images:
 
 bool init_instance(struct state* state, unsigned n_dpy_exts,
 		const char** dpy_exts) {
+	volkInitialize();
 	// setup vulkan instance
 	// query extension support
 	uint32_t avail_extc = 0;
@@ -648,6 +697,9 @@ bool init_instance(struct state* state, unsigned n_dpy_exts,
 	}
 
 	res = vkCreateInstance(&instance_info, NULL, &state->instance);
+
+	volkLoadInstance(state->instance);
+
 	free(enable_exts);
 	if(res != VK_SUCCESS) {
 		vk_error(res, "Could not create instance");
@@ -930,6 +982,8 @@ bool init_renderer(struct state* state) {
 		vk_error(res, "Failed to create vulkan device");
 		return false;
 	}
+
+	volkLoadDevice(dev);
 
 	state->device = dev;
 	state->qs.gfx_fam = gfx_qfam;

@@ -1,0 +1,9 @@
+prefix=/usr/local
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: dlg
+Description: C/C++ logging and debug library
+Version: 0.2.2
+Libs: -L${libdir} -ldlg -pthread
+Cflags: -I${includedir} -I${includedir}/dlg -pthread

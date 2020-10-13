@@ -1,0 +1,2 @@
+/mnt/sda5/home/kitty/Downloads/swa/build_alp/meson-private/cmake_dlg/CMakeFiles/rebuild_cache.dir
+/mnt/sda5/home/kitty/Downloads/swa/build_alp/meson-private/cmake_dlg/CMakeFiles/edit_cache.dir
