@@ -1,0 +1,4 @@
+[wrap-git]
+directory=dlg
+url=https://github.com/zeux/volk
+revision=v0.2.2
