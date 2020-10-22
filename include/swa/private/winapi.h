@@ -2,7 +2,7 @@
 #define UNICODE
 
 #include <swa/swa.h>
-#include <swa/impl.h>
+#include <swa/private/impl.h>
 
 #include <windows.h>
 #include <winuser.h>
@@ -23,6 +23,7 @@ extern "C" {
 
 struct swa_display_win {
 	struct swa_display base;
+	HWND dummy_window;
 
 	// The thread this display was created in.
 	// Since many winapi functions are thread-dependent, we
@@ -33,6 +34,9 @@ struct swa_display_win {
 
 	struct swa_window_win* focus;
 	struct swa_window_win* mouse_over;
+	struct wgl_api* wgl;
+
+	int mx, my; // last mouse coords
 };
 
 struct swa_win_buffer_surface {
@@ -45,7 +49,7 @@ struct swa_win_buffer_surface {
 };
 
 struct swa_win_vk_surface {
-	uint64_t instance;
+	uintptr_t instance;
 	uint64_t surface;
 };
 
@@ -62,11 +66,13 @@ struct swa_window_win {
 	union {
 		struct swa_win_buffer_surface buffer;
 		struct swa_win_vk_surface vk;
+		void* gl_context;
 	};
 
 	struct {
 		HCURSOR handle;
 		bool owned;
+		bool set;
 	} cursor;
 };
 
@@ -76,6 +82,11 @@ struct swa_data_offer_win {
 };
 
 struct swa_display* swa_display_win_create(const char* appname);
+
+// wgl utility
+bool swa_wgl_init_context(struct swa_display_win* dpy, HDC hdc,
+	const struct swa_gl_surface_settings* gls, bool transparent,
+	void** out_context);
 
 #ifdef __cplusplus
 }

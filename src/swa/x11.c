@@ -1,4 +1,4 @@
-#include <swa/x11.h>
+#include <swa/private/x11.h>
 #include <dlg/dlg.h>
 #include <string.h>
 #include <unistd.h>
@@ -26,7 +26,7 @@
 #endif
 
 #ifdef SWA_WITH_GL
-  #include <swa/egl.h>
+  #include <swa/private/egl.h>
   #include <EGL/egl.h>
 #endif
 
@@ -164,7 +164,7 @@ struct swa_x11_cursor {
 
 static xcb_cursor_t get_cursor(struct swa_display_x11* dpy,
 		enum swa_cursor_type type) {
-	for(unsigned i = 0u; i < dpy->n_cursors; ++dpy) {
+	for(unsigned i = 0u; i < dpy->n_cursors; ++i) {
 		if(dpy->cursors[i].type == type) {
 			return dpy->cursors[i].cursor;
 		}
@@ -210,7 +210,7 @@ static xcb_cursor_t get_cursor(struct swa_display_x11* dpy,
 
 	dpy->cursors[dpy->n_cursors - 1].cursor = cursor;
 	dpy->cursors[dpy->n_cursors - 1].type = type;
-	return dpy->cursors[dpy->n_cursors - 1].cursor;
+	return cursor;
 }
 
 static void win_set_cursor(struct swa_window* base, struct swa_cursor cursor) {
@@ -431,7 +431,7 @@ static uint64_t win_get_vk_surface(struct swa_window* base) {
 		return 0;
 	}
 
-	return (uint64_t) win->vk.surface;
+	return win->vk.surface;
 #else
 	dlg_warn("swa was compiled without vulkan suport");
 	return 0;
@@ -677,7 +677,7 @@ static void handle_xinput_event(struct swa_display_x11* dpy,
 		switch(gev->event_type) {
 		case XCB_INPUT_TOUCH_BEGIN:
 			if(win->base.listener->touch_begin) {
-				struct swa_touch_begin_event ev = {
+				struct swa_touch_event ev = {
 					.id = id,
 					.x = x,
 					.y = y,
@@ -686,12 +686,10 @@ static void handle_xinput_event(struct swa_display_x11* dpy,
 			} return;
 		case XCB_INPUT_TOUCH_UPDATE:
 			if(win->base.listener->touch_update) {
-				struct swa_touch_update_event ev = {
+				struct swa_touch_event ev = {
 					.id = id,
 					.x = x,
 					.y = y,
-					// TODO: dx, dy
-					// or remove them from the event?
 				};
 				win->base.listener->touch_update(&win->base, &ev);
 			}
@@ -957,7 +955,7 @@ static void handle_event(struct swa_display_x11* dpy,
 		// store the key state in the local state
 		unsigned idx = key / 64;
 		unsigned bit = key % 64;
-		dpy->keyboard.key_states[idx] |= (uint64_t)(1 << bit);
+		dpy->keyboard.key_states[idx] |= ((uint64_t) 1) << bit;
 
 		char* utf8 = NULL;
 		bool canceled;
@@ -996,9 +994,16 @@ static void handle_event(struct swa_display_x11* dpy,
 			}
 		}
 
+		enum swa_key key = kev->detail - 8;
+
+		// store the key state in the local state
+		unsigned idx = key / 64;
+		unsigned bit = key % 64;
+		dpy->keyboard.key_states[idx] &= ~(((uint64_t) 1) << bit);
+
 		if(win->base.listener->key) {
 			struct swa_key_event lev = {
-				.keycode = kev->detail,
+				.keycode = key,
 				.pressed = false,
 				.utf8 = NULL,
 				.repeated = false,
@@ -1017,10 +1022,11 @@ static void handle_event(struct swa_display_x11* dpy,
 
 		break;
 	} case 0u: {
-		int code = ((xcb_generic_error_t*)ev)->error_code;
+		xcb_generic_error_t* eev = (xcb_generic_error_t*) ev;
+		int code = eev->error_code;
 		char buf[256];
 		XGetErrorText(dpy->display, code, buf, sizeof(buf));
-		dlg_error("retrieved x11 error code:: %s (%d)", buf, code);
+		dlg_error("retrieved x11 error code: %s (%d)", buf, code);
 		break;
 	} default:
 		break;
@@ -1189,7 +1195,7 @@ static bool display_key_pressed(struct swa_display* base, enum swa_key key) {
 
 	unsigned idx = key / 64;
 	unsigned bit = key % 64;
-	return (dpy->keyboard.key_states[idx] & (1 << bit));
+	return (dpy->keyboard.key_states[idx] & (((uint64_t) 1) << bit));
 }
 
 static const char* display_key_name(struct swa_display* base, enum swa_key key) {
@@ -1219,7 +1225,7 @@ static void display_mouse_position(struct swa_display* base, int* x, int* y) {
 }
 static struct swa_window* display_get_mouse_over(struct swa_display* base) {
 	struct swa_display_x11* dpy = get_display_x11(base);
-	return &dpy->mouse.over->base;
+	return dpy->mouse.over ? &dpy->mouse.over->base : NULL;
 }
 static struct swa_data_offer* display_get_clipboard(struct swa_display* base) {
 	// struct swa_display_x11* dpy = get_display_x11(base);
@@ -1515,9 +1521,13 @@ static struct swa_window* display_create_window(struct swa_display* base,
 		XCB_EVENT_MASK_POINTER_MOTION | XCB_EVENT_MASK_FOCUS_CHANGE;
 
 	// Setting the background pixel here may introduce flicker but may fix issues
-	// with creating opengl windows.
-	uint32_t valuemask = XCB_CW_BORDER_PIXEL | XCB_CW_EVENT_MASK | XCB_CW_COLORMAP;
-	uint32_t valuelist[] = {0, eventmask, win->colormap};
+	// with creating opengl windows. To get the default (parent) cursor
+	// on xwayland we apparently have to explicitly specify XCB_NONE as cursor.
+	uint32_t valuemask = XCB_CW_BORDER_PIXEL |
+		XCB_CW_EVENT_MASK |
+		XCB_CW_COLORMAP |
+		XCB_CW_CURSOR;
+	uint32_t valuelist[] = {0, eventmask, win->colormap, XCB_NONE};
 
 	win->window = xcb_generate_id(dpy->conn);
 	xcb_void_cookie_t cookie = xcb_create_window_checked(dpy->conn, win->depth,
@@ -1666,7 +1676,7 @@ static struct swa_window* display_create_window(struct swa_display* base,
 			goto error;
 		}
 
-		win->vk.surface = (uint64_t)surface;
+		win->vk.surface = (uint64_t) surface;
 #else
 		dlg_error("swa was compiled without vulkan support");
 		goto err;
@@ -1892,7 +1902,7 @@ struct swa_display* swa_display_x11_create(const char* appname) {
 		xcb_shm_query_version_reply(dpy->conn, sc, &err);
 	if(!sreply) {
 		handle_error(dpy, err, "xcb_shm_query_version");
-	} else if(sreply->shared_pixmaps &&
+	} else if(/*sreply->shared_pixmaps && */ // we don't need shared pixmaps
 			sreply->major_version >= 1 &&
 			sreply->minor_version >= 2) {
 		dpy->ext.shm = true;

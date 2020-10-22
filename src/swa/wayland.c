@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <swa/config.h>
-#include <swa/wayland.h>
+#include <swa/private/wayland.h>
 #include <dlg/dlg.h>
 #include <pml.h>
 #include <wayland-client-core.h>
@@ -25,7 +25,7 @@
 #endif
 
 #ifdef SWA_WITH_GL
-  #include <swa/egl.h>
+  #include <swa/private/egl.h>
   #include <wayland-egl-core.h>
   #include <EGL/egl.h>
 #endif
@@ -482,7 +482,7 @@ static void win_destroy(struct swa_window* base) {
 	if(win->decoration) zxdg_toplevel_decoration_v1_destroy(win->decoration);
 	if(win->xdg_toplevel) xdg_toplevel_destroy(win->xdg_toplevel);
 	if(win->xdg_surface) xdg_surface_destroy(win->xdg_surface);
-	if(win->surface) wl_surface_destroy(win->surface);
+	if(win->wl_surface) wl_surface_destroy(win->wl_surface);
 
 	free(base);
 }
@@ -552,6 +552,7 @@ static void win_set_cursor(struct swa_window* base, struct swa_cursor cursor) {
 	if(type == swa_cursor_none) {
 		buffer_finish(&win->cursor.buffer);
 		win->cursor.hx = win->cursor.hy = 0;
+		win->cursor.native = NULL;
 	} else if(type == swa_cursor_image) {
 		static const enum wl_shm_format wl_fmt = WL_SHM_FORMAT_ARGB8888;
 		static const enum swa_image_format swa_fmt = swa_image_format_bgra32;
@@ -660,7 +661,7 @@ static void win_surface_frame(struct swa_window* base) {
 		win->frame_callback = NULL;
 	}
 
-	win->frame_callback = wl_surface_frame(win->surface);
+	win->frame_callback = wl_surface_frame(win->wl_surface);
 	wl_callback_add_listener(win->frame_callback, &win_frame_listener, win);
 }
 
@@ -743,7 +744,7 @@ static uint64_t win_get_vk_surface(struct swa_window* base) {
 		return 0;
 	}
 
-	return (uint64_t) win->vk.surface;
+	return win->vk.surface;
 #else
 	dlg_warn("swa was compiled without vulkan suport");
 	return 0;
@@ -767,6 +768,7 @@ static bool win_gl_make_current(struct swa_window* base) {
 	return false;
 #endif
 }
+
 static bool win_gl_swap_buffers(struct swa_window* base) {
 #ifdef SWA_WITH_GL
 	struct swa_window_wl* win = get_window_wl(base);
@@ -786,6 +788,7 @@ static bool win_gl_swap_buffers(struct swa_window* base) {
 	return false;
 #endif
 }
+
 static bool win_gl_set_swap_interval(struct swa_window* base, int interval) {
 #ifdef SWA_WITH_GL
 	// struct swa_window_wl* win = get_window_wl(base);
@@ -871,10 +874,10 @@ static void win_apply_buffer(struct swa_window* base) {
 	}
 
 	struct swa_wl_buffer* buf = &win->buffer.buffers[win->buffer.active];
-	wl_surface_attach(win->surface, buf->buffer, 0, 0);
-	wl_surface_damage(win->surface, 0, 0, INT32_MAX, INT32_MAX);
+	wl_surface_attach(win->wl_surface, buf->buffer, 0, 0);
+	wl_surface_damage(win->wl_surface, 0, 0, INT32_MAX, INT32_MAX);
 	win_surface_frame(&win->base);
-	wl_surface_commit(win->surface);
+	wl_surface_commit(win->wl_surface);
 
 	win->buffer.active = -1;
 }
@@ -1245,6 +1248,8 @@ static void display_destroy(struct swa_display* base) {
 	if(dpy->registry) wl_registry_destroy(dpy->registry);
 	if(dpy->display) wl_display_disconnect(dpy->display);
 	if(dpy->pml) pml_destroy(dpy->pml);
+
+	free((char*) dpy->appname);
 	free(dpy);
 }
 
@@ -1343,7 +1348,7 @@ static bool display_key_pressed(struct swa_display* base, enum swa_key key) {
 
 	unsigned idx = key / 64;
 	unsigned bit = key % 64;
-	return (dpy->key_states[idx] & (1 << bit));
+	return (dpy->key_states[idx] & (((uint64_t) 1) << bit));
 }
 
 static const char* display_key_name(struct swa_display* base, enum swa_key key) {
@@ -1412,7 +1417,7 @@ static struct swa_window* display_get_mouse_over(struct swa_display* base) {
 		return NULL;
 	}
 
-	return &dpy->mouse_over->base;
+	return dpy->mouse_over ? &dpy->mouse_over->base : NULL;
 }
 
 static struct swa_data_offer* display_get_clipboard(struct swa_display* base) {
@@ -1452,10 +1457,10 @@ static struct swa_window* display_create_window(struct swa_display* base,
 	win->width = settings->width;
 	win->height = settings->height;
 
-	win->surface = wl_compositor_create_surface(dpy->compositor);
-	wl_surface_set_user_data(win->surface, win);
+	win->wl_surface = wl_compositor_create_surface(dpy->compositor);
+	wl_surface_set_user_data(win->wl_surface, win);
 
-	win->xdg_surface = xdg_wm_base_get_xdg_surface(dpy->xdg_wm_base, win->surface);
+	win->xdg_surface = xdg_wm_base_get_xdg_surface(dpy->xdg_wm_base, win->wl_surface);
 	xdg_surface_add_listener(win->xdg_surface, &xdg_surface_listener, win);
 	win->xdg_toplevel = xdg_surface_get_toplevel(win->xdg_surface);
 	xdg_toplevel_add_listener(win->xdg_toplevel, &toplevel_listener, win);
@@ -1481,7 +1486,7 @@ static struct swa_window* display_create_window(struct swa_display* base,
 
 	// commit the role so we get a configure event and can start drawing
 	// also important for the decoration mode negotiation
-	wl_surface_commit(win->surface);
+	wl_surface_commit(win->wl_surface);
 
 	// when the decoration protocol is not present, client side decorations
 	// should be assumed on wayland
@@ -1536,7 +1541,7 @@ static struct swa_window* display_create_window(struct swa_display* base,
 		VkWaylandSurfaceCreateInfoKHR info = {0};
 		info.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
 		info.display = win->dpy->display;
-		info.surface = win->surface;
+		info.surface = win->wl_surface;
 
 		VkInstance instance = (VkInstance) win->vk.instance;
 		VkSurfaceKHR surface;
@@ -1580,7 +1585,7 @@ static struct swa_window* display_create_window(struct swa_display* base,
 			SWA_FALLBACK_WIDTH : win->width;
 		unsigned height = win->height == SWA_DEFAULT_SIZE ?
 			SWA_FALLBACK_HEIGHT : win->height;
-		win->gl.egl_window = wl_egl_window_create(win->surface, width, height);
+		win->gl.egl_window = wl_egl_window_create(win->wl_surface, width, height);
 
 		const struct swa_gl_surface_settings* gls = &settings->surface_settings.gl;
 		bool alpha = settings->transparent;
@@ -1784,7 +1789,7 @@ static void touch_down(void* data, struct wl_touch* wl_touch, uint32_t serial,
 	const struct swa_window_listener* listener =
 		win->base.listener;
 	if(listener && listener->touch_begin) {
-		struct swa_touch_begin_event ev = {
+		struct swa_touch_event ev = {
 			.id = id,
 			.x = dpy->touch_points[i].x,
 			.y = dpy->touch_points[i].y,
@@ -1845,12 +1850,10 @@ static void touch_motion(void* data, struct wl_touch* wl_touch, uint32_t time,
 	int x = wl_fixed_to_int(sx);
 	int y = wl_fixed_to_int(sy);
 	if(listener && listener->touch_update) {
-		struct swa_touch_update_event ev = {
+		struct swa_touch_event ev = {
 			.id = id,
 			.x = x,
 			.y = y,
-			.dx = x - dpy->touch_points[i].x,
-			.dy = y - dpy->touch_points[i].y,
 		};
 		listener->touch_update(&dpy->touch_points[i].window->base, &ev);
 	}
@@ -2216,9 +2219,9 @@ static void keyboard_key(void* data, struct wl_keyboard* wl_keyboard,
 	unsigned idx = key / 64;
 	unsigned bit = key % 64;
 	if(pressed) {
-		dpy->key_states[idx] |= (uint64_t)(1 << bit);
+		dpy->key_states[idx] |= ((uint64_t) 1) << bit;
 	} else {
-		dpy->key_states[idx] &= ~(uint64_t)(1 << bit);
+		dpy->key_states[idx] &= ~(((uint64_t) 1) << bit);
 	}
 
 	char* utf8 = NULL;
@@ -2340,6 +2343,7 @@ static void seat_caps(void* data, struct wl_seat* seat, uint32_t caps) {
 		pml_timer_destroy(dpy->key_repeat.timer);
 		wl_keyboard_destroy(dpy->keyboard);
 		dpy->keyboard = NULL;
+		dpy->key_repeat.timer = NULL;
 	}
 
 	if((caps & WL_SEAT_CAPABILITY_POINTER) && !dpy->pointer) {
@@ -2494,8 +2498,10 @@ static void clear_wakeup(struct pml_io* io, unsigned revents) {
 }
 
 struct swa_display* swa_display_wl_create(const char* appname) {
+	errno = 0;
 	struct wl_display* wld = wl_display_connect(NULL);
 	if(!wld) {
+		dlg_error("wl_display_connect: %s", strerror(errno));
 		return NULL;
 	}
 
@@ -2505,7 +2511,7 @@ struct swa_display* swa_display_wl_create(const char* appname) {
 	dpy->base.impl = &display_impl;
 	dpy->display = wld;
 	dpy->pml = pml_new();
-	dpy->appname = appname;
+	dpy->appname = strdup(appname ? appname : "swa");
 	dpy->io_source = pml_io_new(dpy->pml, wl_display_get_fd(wld),
 		POLLIN, dispatch_display);
 	pml_io_set_data(dpy->io_source, dpy);

@@ -6,6 +6,8 @@
 #include <time.h>
 #include <signal.h>
 
+// TODO: handle surface lost error
+
 struct render_buffer {
 	VkCommandBuffer cb;
 	VkImageView iv;
@@ -40,6 +42,12 @@ struct state {
 		PFN_vkCreateDebugUtilsMessengerEXT createDebugUtilsMessengerEXT;
 		PFN_vkDestroyDebugUtilsMessengerEXT destroyDebugUtilsMessengerEXT;
 	} api;
+
+	bool run;
+	bool resized;
+	unsigned w;
+	unsigned h;
+	struct swa_display* dpy;
 };
 
 // fwd decls of vulkan bits
@@ -47,45 +55,116 @@ static bool init_instance(struct state* state, unsigned n_dpy_exts,
 	const char** dpy_exts);
 static bool init_renderer(struct state* state);
 static bool init_render_buffers(struct state* state);
+static void destroy_render_buffers(struct state* state);
+static bool init_swapchain(struct state* state, unsigned width, unsigned height);
 static const char *vulkan_strerror(VkResult err);
 static void cleanup_renderer(struct state* state);
 static void cleanup(struct state* state);
 
 #define vk_error(res, fmt) dlg_error(fmt ": %s (%d)", vulkan_strerror(res), res)
 
-// window callbacks
-static bool run = true;
-struct timespec last_redraw;
+void resize(struct state* state) {
+	// make sure all previous rendering has finished since we will
+	// destroy rendering resources
 
-static void window_draw(struct swa_window* win) {
-	struct state* state = swa_window_get_userdata(win);
-	dlg_info("Redrawing");
+	vkDeviceWaitIdle(state->device);
+	destroy_render_buffers(state);
 	VkResult res;
 
-	struct timespec now;
-	timespec_get(&now, TIME_UTC);
-	float ms = (now.tv_nsec - last_redraw.tv_nsec) / (1000.f * 1000.f);
-	ms += 1000.f * (now.tv_sec - last_redraw.tv_sec);
-	dlg_info("Time between redraws: %f", ms);
-	last_redraw = now;
+	// recreate swapchain
+	VkSurfaceCapabilitiesKHR caps;
+	res = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(state->phdev,
+		state->surface, &caps);
+	if(res != VK_SUCCESS) {
+		vk_error(res, "failed retrieve surface caps");
+		state->run = false;
+		return;
+	}
 
-	// TODO: use per-buffer fences making sure the previous
-	// rendering into this buffer finished
+	if(caps.currentExtent.width == 0xFFFFFFFFu) {
+		state->swapchain_info.imageExtent.width = state->w;
+		state->swapchain_info.imageExtent.height = state->h;
+	} else {
+		dlg_info("  fixed swapchain size: %d %d",
+			caps.currentExtent.width,
+			caps.currentExtent.height);
+		state->swapchain_info.imageExtent.width = caps.currentExtent.width;
+		state->swapchain_info.imageExtent.height = caps.currentExtent.height;
+	}
+
+	state->swapchain_info.oldSwapchain = state->swapchain;
+	res = vkCreateSwapchainKHR(state->device, &state->swapchain_info,
+		NULL, &state->swapchain);
+
+	vkDestroySwapchainKHR(state->device,
+		state->swapchain_info.oldSwapchain, NULL);
+	state->swapchain_info.oldSwapchain = VK_NULL_HANDLE;
+
+	if (res != VK_SUCCESS) {
+		vk_error(res, "Failed to create vk swapchain");
+		state->run = false;
+		return;
+	}
+
+	// recreate render buffers
+	if(!init_render_buffers(state)) {
+		state->run = false;
+		return;
+	}
+
+	state->resized = false;
+}
+
+static void window_resize(struct swa_window* win, unsigned w, unsigned h) {
+	struct state* state = swa_window_get_userdata(win);
+	dlg_info("resized to %d %d", w, h);
+
+	if(!state->swapchain) {
+		if(!init_swapchain(state, w, h)) {
+			dlg_error("Failed to init swapchain");
+			return;
+		}
+	}
+
+	state->resized = true;
+	state->w = w;
+	state->h = h;
+}
+
+static bool window_draw(struct swa_window* win) {
+	struct state* state = swa_window_get_userdata(win);
+	VkResult res;
+
+	if(!state->swapchain) {
+		dlg_warn("No swapchain!");
+		return false;
+	}
+
+	// struct timespec now;
+	// timespec_get(&now, TIME_UTC);
+	// float ms = (now.tv_nsec - last_redraw.tv_nsec) / (1000.f * 1000.f);
+	// ms += 1000.f * (now.tv_sec - last_redraw.tv_sec);
+	// dlg_info("Time between redraws: %f", ms);
+	// last_redraw = now;
+
 	vkDeviceWaitIdle(state->device);
 
 	// acquire image
+	// we treat suboptimal as success here
 	uint32_t id;
-	res = vkAcquireNextImageKHR(state->device, state->swapchain,
-		UINT64_MAX, state->acquire_sem, VK_NULL_HANDLE, &id);
-	if(res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
-		if(res == VK_ERROR_OUT_OF_DATE_KHR) {
+	while(true) {
+		res = vkAcquireNextImageKHR(state->device, state->swapchain,
+			UINT64_MAX, state->acquire_sem, VK_NULL_HANDLE, &id);
+		if(res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) {
+			break;
+		} else if(res == VK_ERROR_OUT_OF_DATE_KHR) {
 			dlg_warn("Got out of date swapchain (acquire)");
-			return;
+			return false;
+		} else {
+			vk_error(res, "vkAcquireNextImageKHR");
+			state->run = false;
+			return false;
 		}
-
-		vk_error(res, "vkAcquireNextImageKHR");
-		run = false;
-		return;
 	}
 
 	// submit render commands
@@ -104,11 +183,9 @@ static void window_draw(struct swa_window* win) {
 	res = vkQueueSubmit(state->qs.gfx, 1, &si, VK_NULL_HANDLE);
 	if(res != VK_SUCCESS) {
 		vk_error(res, "vkQueueSubmit");
-		run = false;
-		return;
+		state->run = false;
+		return false;
 	}
-
-	swa_window_surface_frame(win);
 
 	// present
 	VkPresentInfoKHR present_info = {0};
@@ -122,81 +199,32 @@ static void window_draw(struct swa_window* win) {
 	res = vkQueuePresentKHR(state->qs.present, &present_info);
 	if(res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
 		if(res == VK_ERROR_OUT_OF_DATE_KHR) {
-			dlg_warn("Got out of date swapchain (acquire)");
-			return;
+			dlg_warn("Got out of date swapchain (present)");
+			return true;
 		}
 
 		vk_error(res, "vkQueuePresentKHR");
-		run = false;
-		return;
+		state->run = false;
+		return false;
 	}
 
-	swa_window_refresh(win);
+	return true;
 }
 
 static void window_close(struct swa_window* win) {
-	run = false;
-}
-
-static void window_resize(struct swa_window* win, unsigned w, unsigned h) {
 	struct state* state = swa_window_get_userdata(win);
-	// dlg_info("resized to %d %d", w, h);
-
-	// make sure all previous rendering has finished since we will
-	// destroy rendering resources
-	vkDeviceWaitIdle(state->device);
-
-	// recreate swapchain
-	VkSurfaceCapabilitiesKHR caps;
-	VkResult res = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(state->phdev,
-		state->surface, &caps);
-	if (res != VK_SUCCESS) {
-		vk_error(res, "failed retrieve surface caps");
-		run = false;
-		return;
-	}
-
-	if (caps.currentExtent.width == 0xFFFFFFFFu) {
-		state->swapchain_info.imageExtent.width = w;
-		state->swapchain_info.imageExtent.height = h;
-	} else {
-		// dlg_info("  fixed swapchain size: %d %d", w, h);
-		state->swapchain_info.imageExtent.width = caps.currentExtent.width;
-		state->swapchain_info.imageExtent.height = caps.currentExtent.height;
-	}
-
-	state->swapchain_info.oldSwapchain = state->swapchain;
-	res = vkCreateSwapchainKHR(state->device, &state->swapchain_info,
-		NULL, &state->swapchain);
-
-	if(state->swapchain_info.oldSwapchain) {
-		state->swapchain_info.oldSwapchain = VK_NULL_HANDLE;
-		vkDestroySwapchainKHR(state->device,
-			state->swapchain_info.oldSwapchain, NULL);
-	}
-
-	if (res != VK_SUCCESS) {
-		vk_error(res, "Failed to create vk swapchain");
-		run = false;
-		return;
-	}
-
-	// recreate render buffers
-	if(!init_render_buffers(state)) {
-		run = false;
-		return;
-	}
+	state->run = false;
 }
 
 static void window_key(struct swa_window* win, const struct swa_key_event* ev) {
+	struct state* state = swa_window_get_userdata(win);
 	if(ev->pressed && ev->keycode == swa_key_escape) {
 		dlg_info("Escape pressed, exiting");
-		run = false;
+		state->run = false;
 	}
 }
 
 static const struct swa_window_listener window_listener = {
-	.draw = window_draw,
 	.close = window_close,
 	.resize = window_resize,
 	.key = window_key,
@@ -275,13 +303,21 @@ int main() {
 	}
 
 	swa_window_set_userdata(win, &state);
-	timespec_get(&last_redraw, TIME_UTC);
+	// timespec_get(&last_redraw, TIME_UTC);
 
 	// main loop
-	while(run) {
-		if(!swa_display_dispatch(dpy, true)) {
+	state.run = true;
+	state.dpy = dpy;
+	while(state.run) {
+		if(!swa_display_dispatch(dpy, false)) {
 			break;
 		}
+
+		if(state.resized) {
+			resize(&state);
+		}
+
+		window_draw(win);
 	}
 
 cleanup_win:
@@ -327,12 +363,13 @@ static VkBool32 debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
 		// - https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/624
 		// - https://github.com/KhronosGroup/Vulkan-ValidationLayers/pull/1015
 		//   that pr introduced the behavior in the validation layers
-		"VUID-VkSwapchainCreateInfoKHR-imageExtent-01274"
+		// "VUID-VkSwapchainCreateInfoKHR-imageExtent-01274"
+		NULL,
 	};
 
-	if (debug_data->pMessageIdName) {
-		for (unsigned i = 0; i < sizeof(ignored) / sizeof(ignored[0]); ++i) {
-			if (!strcmp(debug_data->pMessageIdName, ignored[i])) {
+	if(debug_data->pMessageIdName) {
+		for(unsigned i = 0; i < sizeof(ignored) / sizeof(ignored[0]); ++i) {
+			if(ignored[i] && !strcmp(debug_data->pMessageIdName, ignored[i])) {
 				return false;
 			}
 		}
@@ -411,7 +448,6 @@ static bool init_render_buffers(struct state* state) {
 	VkResult res;
 	VkDevice dev = state->device;
 
-	destroy_render_buffers(state);
 	res = vkGetSwapchainImagesKHR(dev, state->swapchain,
 		&state->n_bufs, NULL);
 	if (res != VK_SUCCESS) {
@@ -572,7 +608,9 @@ bool init_instance(struct state* state, unsigned n_dpy_exts,
 	memcpy(enable_exts, dpy_exts, sizeof(*dpy_exts) * n_dpy_exts);
 	uint32_t enable_extc = n_dpy_exts;
 
-	bool use_layers = false;
+	// TODO: layers seem to crash when using VkDisplayKHR api (used by
+	// swa kms backend).
+	bool use_layers = true;
 	const char* req = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
 	bool has_debug = has_extension(avail_exts, avail_extc, req);
 	bool use_debug = has_debug && use_layers;
@@ -648,6 +686,115 @@ bool init_instance(struct state* state, unsigned n_dpy_exts,
 	}
 
 	state->messenger = messenger;
+	return true;
+}
+
+static bool init_swapchain(struct state* state, unsigned width, unsigned height) {
+	VkResult res;
+	VkDevice dev = state->device;
+
+	VkSwapchainCreateInfoKHR* info = &state->swapchain_info;
+	info->sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+	info->surface = state->surface;
+
+	// Get available present modes
+	uint32_t present_mode_count;
+	vkGetPhysicalDeviceSurfacePresentModesKHR(state->phdev, state->surface,
+		&present_mode_count, NULL);
+	VkPresentModeKHR *present_modes =
+		calloc(present_mode_count, sizeof(VkPresentModeKHR));
+
+	res = vkGetPhysicalDeviceSurfacePresentModesKHR(state->phdev,
+		state->surface, &present_mode_count, present_modes);
+	if(res != VK_SUCCESS || present_mode_count == 0) {
+		vk_error(res, "Failed to retrieve surface present modes");
+		return false;
+	}
+
+	// this mode is required to be supported
+	info->presentMode = VK_PRESENT_MODE_FIFO_KHR;
+
+	bool vsync = false;
+	if(!vsync) {
+		for (size_t i = 0; i < present_mode_count; i++) {
+			if (present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
+				info->presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+				break;
+			} else if (present_modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+				info->presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+			}
+		}
+	}
+
+	free(present_modes);
+
+	VkSurfaceCapabilitiesKHR caps;
+	res = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(state->phdev,
+		state->surface, &caps);
+	if(res != VK_SUCCESS) {
+		vk_error(res, "failed retrieve surface caps");
+		return false;
+	}
+
+	uint32_t pref_image_count = caps.minImageCount + 1;
+	if((caps.maxImageCount > 0) && (pref_image_count > caps.maxImageCount)) {
+		pref_image_count = caps.maxImageCount;
+	}
+
+	// transformation
+	VkSurfaceTransformFlagBitsKHR transform =
+		VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+	if(!(caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)) {
+		transform = caps.currentTransform;
+	}
+
+	// use alpha if possible
+	VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	VkCompositeAlphaFlagBitsKHR alpha_flags[] = {
+		VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+		VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+		VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+		VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+	};
+
+	for(int i = 0; i < 4; ++i) {
+		if (caps.supportedCompositeAlpha & alpha_flags[i]) {
+			alpha = alpha_flags[i];
+			break;
+		}
+	}
+
+	// In this case, we can freely choose the size.
+	if(caps.currentExtent.width == 0xFFFFFFFFu) {
+		info->imageExtent.width = width;
+		info->imageExtent.height = height;
+	} else {
+		info->imageExtent.width = caps.currentExtent.width;
+		info->imageExtent.height = caps.currentExtent.height;
+	}
+
+	// usage
+	dlg_assert(caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+	info->imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+	// create swapchain
+	info->minImageCount = pref_image_count;
+	info->preTransform = transform;
+	info->imageArrayLayers = 1;
+	info->imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	info->clipped = VK_TRUE;
+	info->compositeAlpha = alpha;
+
+	res = vkCreateSwapchainKHR(dev, info, NULL, &state->swapchain);
+	if(res != VK_SUCCESS) {
+		vk_error(res, "Failed to create vk swapchain");
+		return false;
+	}
+
+	if(!init_render_buffers(state)) {
+		return false;
+	}
+
 	return true;
 }
 
@@ -792,12 +939,7 @@ bool init_renderer(struct state* state) {
 		state->qs.present = state->qs.gfx;
 	}
 
-	// create swapchain
-	VkSwapchainCreateInfoKHR info = {0};
-	info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-	info.surface = state->surface;
-
-	// format
+	// query render format
 	uint32_t formats_count;
 	res = vkGetPhysicalDeviceSurfaceFormatsKHR(state->phdev,
 		state->surface, &formats_count, NULL);
@@ -816,111 +958,17 @@ bool init_renderer(struct state* state) {
 
 	// try to find a format matching our needs if we don't have
 	// free choice
-	info.imageFormat = formats[0].format;
-	info.imageColorSpace = formats[0].colorSpace;
+	state->swapchain_info.imageFormat = formats[0].format;
+	state->swapchain_info.imageColorSpace = formats[0].colorSpace;
 	if(formats_count == 1 && formats[0].format == VK_FORMAT_UNDEFINED) {
-		info.imageFormat = VK_FORMAT_B8G8R8A8_SRGB;
+		state->swapchain_info.imageFormat = VK_FORMAT_B8G8R8A8_SRGB;
 	}
 
 	free(formats);
 
-	// Get available present modes
-	uint32_t present_mode_count;
-	vkGetPhysicalDeviceSurfacePresentModesKHR(state->phdev, state->surface,
-		&present_mode_count, NULL);
-	VkPresentModeKHR *present_modes =
-		calloc(present_mode_count, sizeof(VkPresentModeKHR));
-
-	res = vkGetPhysicalDeviceSurfacePresentModesKHR(state->phdev,
-		state->surface, &present_mode_count, present_modes);
-	if(res != VK_SUCCESS || present_mode_count == 0) {
-		vk_error(res, "Failed to retrieve surface present modes");
-		return false;
-	}
-
-	// this mode is required to be supported
-	info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
-
-	bool vsync = false;
-	if(!vsync) {
-		for (size_t i = 0; i < present_mode_count; i++) {
-			if (present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
-				info.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
-				break;
-			} else if (present_modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) {
-				info.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
-			}
-		}
-	}
-
-	free(present_modes);
-
-	VkSurfaceCapabilitiesKHR caps;
-	res = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(state->phdev,
-		state->surface, &caps);
-	if(res != VK_SUCCESS) {
-		vk_error(res, "failed retrieve surface caps");
-		return false;
-	}
-
-	uint32_t pref_image_count = caps.minImageCount + 1;
-	if((caps.maxImageCount > 0) && (pref_image_count > caps.maxImageCount)) {
-		pref_image_count = caps.maxImageCount;
-	}
-
-	// transformation
-	VkSurfaceTransformFlagBitsKHR transform =
-		VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-	if(!(caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)) {
-		transform = caps.currentTransform;
-	}
-
-	// use alpha if possible
-	VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-	VkCompositeAlphaFlagBitsKHR alpha_flags[] = {
-		VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
-		VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
-		VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-		VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
-	};
-
-	for(int i = 0; i < 4; ++i) {
-		if (caps.supportedCompositeAlpha & alpha_flags[i]) {
-			alpha = alpha_flags[i];
-			break;
-		}
-	}
-
-	if(caps.currentExtent.width == 0xFFFFFFFFu) {
-		info.imageExtent.width = 800;
-		info.imageExtent.height = 500;
-	} else {
-		info.imageExtent.width = caps.currentExtent.width;
-		info.imageExtent.height = caps.currentExtent.height;
-	}
-
-	// usage
-	dlg_assert(caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
-	info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-
-	// create swapchain
-	info.minImageCount = pref_image_count;
-	info.preTransform = transform;
-	info.imageArrayLayers = 1;
-	info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	info.clipped = VK_TRUE;
-	info.compositeAlpha = alpha;
-
-	state->swapchain_info = info;
-	res = vkCreateSwapchainKHR(dev, &info, NULL, &state->swapchain);
-	if(res != VK_SUCCESS) {
-		vk_error(res, "Failed to create vk swapchain");
-		return false;
-	}
-
 	// render pass
 	VkAttachmentDescription attachment = {0};
-	attachment.format = info.imageFormat;
+	attachment.format = state->swapchain_info.imageFormat;
 	attachment.samples = VK_SAMPLE_COUNT_1_BIT;
 	attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
 	attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -970,10 +1018,6 @@ bool init_renderer(struct state* state) {
 	res = vkCreateSemaphore(dev, &sem_info, NULL, &state->render_sem);
 	if(res != VK_SUCCESS) {
 		vk_error(res, "vkCreateSemaphore");
-		return false;
-	}
-
-	if(!init_render_buffers(state)) {
 		return false;
 	}
 

@@ -20,7 +20,7 @@ struct swa_window_listener;
 
 typedef void (*swa_gl_proc)(void);
 
-// When this value are specified as size in swa_window_settings,
+// When this value is specified as size in swa_window_settings,
 // the system default will be used.
 // If the system has no default, will use the SWA_FALLBACK_* values.
 // The main advantage of using SWA_DEFAULT_SIZE is that swa will
@@ -203,7 +203,7 @@ struct swa_gl_surface_settings {
 // It must have furthermore been created with *all* extensions
 // returned by swa_display_vk_extensions.
 struct swa_vk_surface_settings {
-	uint64_t instance; // type: VkInstance
+	uintptr_t instance; // type: VkInstance
 };
 
 struct swa_buffer_surface_settings {
@@ -246,12 +246,6 @@ struct swa_window_settings {
 	// The listener object must remain valid until it is changed or the window
 	// is destroyed. Must not be NULL.
 	const struct swa_window_listener* listener;
-};
-
-struct swa_size_event {
-	// The new size (width and height) of the window.
-	unsigned width;
-	unsigned height;
 };
 
 struct swa_key_event {
@@ -306,29 +300,18 @@ struct swa_dnd_event {
 	int x, y;
 };
 
-struct swa_touch_begin_event {
-	// Identification of the new touch point. This id will passed to further
+struct swa_touch_event {
+	// Identification of the point. This id will passed to further
 	// touch events and can be used to identify this touch point.
 	// Touch point ids are unique as long as they exist (between `touch_begin`
 	// and `touch_end` or `touch_cancel`) but might be reused after that.
 	unsigned id;
-	// Initial position of the new touch point in window-local coordinates.
-	int x, y;
-};
-
-struct swa_touch_update_event {
-	// The identification of the touch point as previously introduced
-	// by `touch_begin`.
-	unsigned id;
 	// Position of the touch point in window-local coordinates.
 	int x, y;
-	// Difference between the current and last touch positions
-	// in window-local coordinates.
-	int dx, dy;
 };
 
 // All callbacks are guaranteed to only be called from inside
-// `swa_display_dispatch(_pending)`
+// `swa_display_dispatch`
 struct swa_window_listener {
 	// Called by the system e.g. when the window contents where invalidated
 	// or emitted in response to a call to `swa_window_refresh`.
@@ -347,7 +330,10 @@ struct swa_window_listener {
 	// For newly created windows, this will be emitted only when
 	// the initial window size was chosen to be different from the
 	// size passed in the `swa_window_settings`. When the settings
-	// used `SWA_DEFAULT_SIZE`, this event will always be emitted.
+	// used `SWA_DEFAULT_SIZE`, this event will always be emitted after
+	// creation. Listeners don't have to call `swa_window_refresh` from
+	// within this function (or start drawing directly), backends will
+	// send a `draw` event if needed.
 	void (*resize)(struct swa_window*, unsigned width, unsigned height);
 	// Called when the window state changes.
 	// For newly created windows, this will be emitted only when
@@ -381,9 +367,9 @@ struct swa_window_listener {
 	void (*mouse_wheel)(struct swa_window*, float dx, float dy);
 
 	// Called when a new touch point is created.
-	void (*touch_begin)(struct swa_window*, const struct swa_touch_begin_event*);
+	void (*touch_begin)(struct swa_window*, const struct swa_touch_event*);
 	// Updates the position of a touch point.
-	void (*touch_update)(struct swa_window*, const struct swa_touch_update_event*);
+	void (*touch_update)(struct swa_window*, const struct swa_touch_event*);
 	// touch_end: ends a touch point. No further events for this
 	// touch point will be generated.
 	// id: the identification of the touch point as previously introduced
@@ -442,6 +428,8 @@ SWA_API void swa_display_destroy(struct swa_display*);
 // until at least one event has been dispatched.
 // Returns false if there was a critical error that means this display
 // should be destroyed (e.g. connection to display server lost).
+// It's not allowed to call this function recursively, i.e. from
+// a callback triggered from this function.
 SWA_API bool swa_display_dispatch(struct swa_display*, bool block);
 
 // Can be used to wakeup `swa_display_wait_events` from another thread.
@@ -752,6 +740,24 @@ SWA_API void* swa_data_offer_get_userdata(struct swa_data_offer*);
 // to SWA_DEFAULT_POSITION. Will otherwise memset the settings
 // to 0. Will not specify any surface to create.
 SWA_API void swa_window_settings_default(struct swa_window_settings*);
+
+// Returns the name of the given key enumeration (null-terminated).
+// For example, swa_key_to_name(swa_key_tab) returns "tab".
+// Returns "<invalid>" if the key isn't known.
+SWA_API const char* swa_key_to_name(enum swa_key);
+
+// Tries to find a swa_key enumeration value for the given key name.
+// For exapmle, swa_key_from_name("w") returns swa_key_w.
+// If no matching swa_key exists, returns swa_key_none.
+SWA_API enum swa_key swa_key_from_name(const char* name);
+
+// Returns whether the key is textual, i.e. is usually textually
+// represented. Returns true for keys like swa_key_w, swa_key_k0
+// or swa_key_leftbrace while it returns false for keys like swa_key_enter,
+// swa_key_backspace, swa_key_leftctrl, swa_key_f1 or swa_key_left.
+// Whether or not a key is textual can depend on the circumstance (e.g.
+// you might want to interpret keys like enter as textual).
+SWA_API bool swa_key_is_textual(enum swa_key key);
 
 #ifdef __cplusplus
 }

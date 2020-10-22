@@ -1,6 +1,6 @@
-#include "vulkan.h"
 #include <swa/swa.h>
-#include <swa/impl.h>
+#include <swa/private/impl.h>
+#include <swa/private/kms/vulkan.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <unistd.h>
@@ -60,12 +60,13 @@ struct drm_vk_api {
 	PFN_vkRegisterDisplayEventEXT registerDisplayEventEXT;
 };
 
-struct drm_vk_surface {
+struct swa_kms_vk_surface {
 	VkInstance instance;
 	VkPhysicalDevice phdev;
 	VkDisplayPropertiesKHR display;
 	VkSurfaceKHR surface;
 	VkDisplayModeKHR mode;
+	unsigned width, height;
 	struct swa_window* window;
 
 	VkDevice device;
@@ -96,7 +97,7 @@ static bool has_extension(const VkExtensionProperties *avail,
 	return false;
 }
 
-static void finish_device(struct drm_vk_surface* surf) {
+static void finish_device(struct swa_kms_vk_surface* surf) {
 	if(surf->device) {
 		vkDestroyDevice(surf->device, NULL);
 		surf->device = VK_NULL_HANDLE;
@@ -106,7 +107,7 @@ static void finish_device(struct drm_vk_surface* surf) {
 	surf->has_display_control = false;
 }
 
-static void init_device(struct drm_vk_surface* surf) {
+static void init_device(struct swa_kms_vk_surface* surf) {
 	VkResult res;
 
 	// find supported extensions
@@ -183,7 +184,7 @@ error:
 }
 
 static void* frame_thread(void* data) {
-	struct drm_vk_surface* surf = data;
+	struct swa_kms_vk_surface* surf = data;
 	while(true) {
 		pthread_mutex_lock(&surf->frame.mutex);
 		if(surf->frame.join) {
@@ -237,7 +238,7 @@ static void* frame_thread(void* data) {
 }
 
 static void eventfd_readable(struct pml_io* io, unsigned revents) {
-	struct drm_vk_surface* surf = pml_io_get_data(io);
+	struct swa_kms_vk_surface* surf = pml_io_get_data(io);
 	dlg_assert(pml_io_get_fd(io) == surf->frame.eventfd);
 	dlg_assert(surf->window->listener->draw);
 	dlg_trace("eventfd readable");
@@ -255,7 +256,7 @@ static void eventfd_readable(struct pml_io* io, unsigned revents) {
 	}
 }
 
-static void init_frame(struct pml* pml, struct drm_vk_surface* surf) {
+static void init_frame(struct pml* pml, struct swa_kms_vk_surface* surf) {
 	surf->frame.eventfd = eventfd(0, EFD_CLOEXEC);
 	if(surf->frame.eventfd < 0) {
 		dlg_error("eventfd failed: %s", strerror(errno));
@@ -280,7 +281,7 @@ error:
 	return;
 }
 
-void drm_vk_surface_destroy(struct drm_vk_surface* surf) {
+void swa_kms_vk_surface_destroy(struct swa_kms_vk_surface* surf) {
 	if(!surf) {
 		return;
 	}
@@ -304,7 +305,7 @@ void drm_vk_surface_destroy(struct drm_vk_surface* surf) {
 	free(surf);
 }
 
-struct drm_vk_surface* drm_vk_surface_create(struct pml* pml,
+struct swa_kms_vk_surface* swa_kms_vk_surface_create(struct pml* pml,
 		VkInstance instance, struct swa_window* window) {
 	VkResult res;
 
@@ -333,7 +334,7 @@ struct drm_vk_surface* drm_vk_surface_create(struct pml* pml,
 		phdev = phdevs[1];
 	}
 
-	struct drm_vk_surface* surf = calloc(1, sizeof(*surf));
+	struct swa_kms_vk_surface* surf = calloc(1, sizeof(*surf));
 	surf->instance = instance;
 	surf->phdev = phdev;
 	surf->window = window;
@@ -498,6 +499,10 @@ struct drm_vk_surface* drm_vk_surface_create(struct pml* pml,
 		goto error;
 	}
 
+	surf->width = mode_props->parameters.visibleRegion.width;
+	surf->height = mode_props->parameters.visibleRegion.height;
+	surf->mode = mode; // TODO: not really needed later on, right?
+
 	free(display_props);
 	free(plane_props);
 	free(modes);
@@ -514,21 +519,20 @@ struct drm_vk_surface* drm_vk_surface_create(struct pml* pml,
 		dlg_warn("No support for display control extensions");
 	}
 
-	surf->mode = mode; // TODO: not really needed later on, right?
 	return surf;
 
 error:
 	free(display_props);
 	free(plane_props);
 	free(modes);
-	drm_vk_surface_destroy(surf);
+	swa_kms_vk_surface_destroy(surf);
 	return NULL;
 }
 
 // TODO: when this is called *before* vkQueuePresentKHR was called
 // the first time (and surface_frame should always be called before
 // queuePresent), the registerDisplayEventEXT call may fail.
-void drm_vk_surface_frame(struct drm_vk_surface* surf) {
+void swa_kms_vk_surface_frame(struct swa_kms_vk_surface* surf) {
 	if(!surf->has_display_control) {
 		return;
 	}
@@ -565,7 +569,7 @@ void drm_vk_surface_frame(struct drm_vk_surface* surf) {
 	pthread_mutex_unlock(&surf->frame.mutex);
 }
 
-bool drm_vk_surface_refresh(struct drm_vk_surface* surf) {
+bool swa_kms_vk_surface_refresh(struct swa_kms_vk_surface* surf) {
 	bool pending;
 	pthread_mutex_lock(&surf->frame.mutex);
 	pending = (bool)surf->frame.fence || (bool)surf->frame.next_fence;
@@ -581,6 +585,12 @@ bool drm_vk_surface_refresh(struct drm_vk_surface* surf) {
 	return false;
 }
 
-VkSurfaceKHR drm_vk_surface_get(struct drm_vk_surface* surf) {
+VkSurfaceKHR swa_kms_vk_surface_get_surface(struct swa_kms_vk_surface* surf) {
 	return surf->surface;
+}
+
+void swa_kms_vk_surface_get_size(struct swa_kms_vk_surface* surf,
+		unsigned* width, unsigned* height) {
+	*width = surf->width;
+	*height = surf->height;
 }

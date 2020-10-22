@@ -1,17 +1,14 @@
 #pragma once
 
 #include <swa/swa.h>
-#include <swa/impl.h>
-#include <swa/xkb.h>
+#include <swa/private/impl.h>
+#include <swa/private/xkb.h>
 #include <xcb/xcb_ewmh.h>
 #include <xcb/present.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-typedef void* EGLSurface;
-typedef void* EGLContext;
 
 // xlib/xcb forward declarations
 typedef struct _XDisplay Display;
@@ -111,13 +108,13 @@ struct swa_x11_buffer_surface {
 };
 
 struct swa_x11_vk_surface {
-	uint64_t instance;
+	uintptr_t instance;
 	uint64_t surface;
 };
 
 struct swa_x11_gl_surface {
-	EGLSurface surface;
-	EGLContext context;
+	void* surface; // EGLSurface
+	void* context; // EGLContext
 };
 
 struct swa_window_x11 {

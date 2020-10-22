@@ -1,9 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include "drm.h"
-#include "props.h"
-#include "xcursor.h"
-#include <swa/xkb.h>
+#include <swa/private/kms/kms.h>
+#include <swa/private/kms/props.h>
+#include <swa/private/kms/xcursor.h>
+#include <swa/private/xkb.h>
 #include <dlg/dlg.h>
 #include <assert.h>
 #include <errno.h>
@@ -37,11 +37,11 @@
 #include <linux/input-event-codes.h>
 
 #ifdef SWA_WITH_VK
-  #include "vulkan.h"
+  #include <swa/private/kms/vulkan.h>
 #endif
 
 #ifdef SWA_WITH_GL
-  #include <swa/egl.h>
+  #include <swa/private/egl.h>
   #include <gbm.h>
 #endif
 
@@ -51,14 +51,14 @@ static const struct swa_window_interface window_impl;
 // from xcursor.c
 const char* const* swa_get_xcursor_names(enum swa_cursor_type type);
 
-static struct drm_display* get_display_drm(struct swa_display* base) {
+static struct swa_display_kms* get_display_kms(struct swa_display* base) {
 	dlg_assert(base->impl == &display_impl);
-	return (struct drm_display*) base;
+	return (struct swa_display_kms*) base;
 }
 
-static struct drm_window* get_window_drm(struct swa_window* base) {
+static struct swa_window_kms* get_window_kms(struct swa_window* base) {
 	dlg_assert(base->impl == &window_impl);
-	return (struct drm_window*) base;
+	return (struct swa_window_kms*) base;
 }
 
 static bool add_fd_flags(int fd, int add_flags) {
@@ -94,8 +94,8 @@ static bool swa_pipe(int fds[static 2]) {
 	return true;
 }
 
-static void finish_dumb_buffer(struct drm_display* dpy,
-		struct drm_dumb_buffer* buf) {
+static void finish_dumb_buffer(struct swa_display_kms* dpy,
+		struct swa_kms_dumb_buffer* buf) {
 	if(buf->fb_id) {
 		drmModeRmFB(dpy->drm.fd, buf->fb_id);
 	}
@@ -110,9 +110,9 @@ static void finish_dumb_buffer(struct drm_display* dpy,
 	memset(buf, 0x0, sizeof(*buf));
 }
 
-static bool init_dumb_buffer(struct drm_display* dpy,
+static bool init_dumb_buffer(struct swa_display_kms* dpy,
 		unsigned width, unsigned height, unsigned format,
-		struct drm_dumb_buffer* buf) {
+		struct swa_kms_dumb_buffer* buf) {
 	// The create ioctl uses the combination of depth and bpp to infer
 	// a format; 24/32 refers to DRM_FORMAT_XRGB8888 as defined in
 	// the drm_fourcc.h header. These arguments are the same as given
@@ -209,7 +209,7 @@ static void atomic_add(struct atomic* atom, uint32_t id, uint32_t prop, uint64_t
 
 // window
 static void win_destroy(struct swa_window* base) {
-	struct drm_window* win = get_window_drm(base);
+	struct swa_window_kms* win = get_window_kms(base);
 	if(win->output) win->output->window = NULL;
 	if(win->dpy->input.pointer.over == win) {
 		win->dpy->input.pointer.over = NULL;
@@ -248,7 +248,7 @@ static void win_set_size(struct swa_window* base, unsigned w, unsigned h) {
 }
 
 static void win_set_cursor(struct swa_window* base, struct swa_cursor cursor) {
-	struct drm_window* win = get_window_drm(base);
+	struct swa_window_kms* win = get_window_kms(base);
 
 	// TODO: For vulkan this will be somewhat complicated. We probably
 	// have to create our own, internal vulkan device i guess?
@@ -267,11 +267,12 @@ static void win_set_cursor(struct swa_window* base, struct swa_cursor cursor) {
 		return;
 	}
 
+	/*
 	if(!win->output->cursor_plane.id) {
-		// TODO: fall back to legacy drmModeSetCursor api
 		dlg_error("No cursor plane");
 		return;
 	}
+	*/
 
 	enum swa_cursor_type type = cursor.type;
 	if(type == swa_cursor_default) {
@@ -397,19 +398,21 @@ static void win_set_cursor(struct swa_window* base, struct swa_cursor cursor) {
 }
 
 static void win_refresh(struct swa_window* base) {
-	struct drm_window* win = get_window_drm(base);
+	struct swa_window_kms* win = get_window_kms(base);
 	if(win->surface_type == swa_surface_buffer) {
 		if(!win->buffer.pending && !win->buffer.active) {
 			if(win->base.listener->draw) {
-				pml_defer_enable(win->defer_draw, true);
+				win->defer_events |=  swa_kms_defer_draw;
+				pml_defer_enable(win->defer, true);
 			}
 		} else {
 			win->redraw = true;
 		}
 	} else if(win->surface_type == swa_surface_vk) {
 #ifdef SWA_WITH_VK
-		if(!drm_vk_surface_refresh(win->vk)) {
-			pml_defer_enable(win->defer_draw, true);
+		if(!swa_kms_vk_surface_refresh(win->vk)) {
+			win->defer_events |=  swa_kms_defer_draw;
+			pml_defer_enable(win->defer, true);
 		}
 #else
 		dlg_error("window has vk surface but swa was built without vulkan");
@@ -418,7 +421,8 @@ static void win_refresh(struct swa_window* base) {
 #ifdef SWA_WITH_GL
 		if(!win->gl.pending) {
 			if(win->base.listener->draw) {
-				pml_defer_enable(win->defer_draw, true);
+				win->defer_events |=  swa_kms_defer_draw;
+				pml_defer_enable(win->defer, true);
 			}
 		} else {
 			win->redraw = true;
@@ -432,10 +436,10 @@ static void win_refresh(struct swa_window* base) {
 }
 
 static void win_surface_frame(struct swa_window* base) {
-	struct drm_window* win = get_window_drm(base);
+	struct swa_window_kms* win = get_window_kms(base);
 	if(win->surface_type == swa_surface_vk) {
 #ifdef SWA_WITH_VK
-		drm_vk_surface_frame(win->vk);
+		swa_kms_vk_surface_frame(win->vk);
 #else
 		dlg_error("window has vk surface but swa was built without vulkan");
 #endif
@@ -476,13 +480,13 @@ static bool win_is_client_decorated(struct swa_window* base) {
 
 static uint64_t win_get_vk_surface(struct swa_window* base) {
 #ifdef SWA_WITH_VK
-	struct drm_window* win = get_window_drm(base);
+	struct swa_window_kms* win = get_window_kms(base);
 	if(win->surface_type != swa_surface_vk) {
 		dlg_warn("can't get vulkan surface from non-vulkan window");
 		return 0;
 	}
 
-	return (uint64_t) drm_vk_surface_get(win->vk);
+	return (uint64_t) swa_kms_vk_surface_get_surface(win->vk);
 #else
 	dlg_warn("swa was compiled without vulkan suport");
 	return 0;
@@ -491,7 +495,7 @@ static uint64_t win_get_vk_surface(struct swa_window* base) {
 
 static bool win_gl_make_current(struct swa_window* base) {
 #ifdef SWA_WITH_GL
-	struct drm_window* win = get_window_drm(base);
+	struct swa_window_kms* win = get_window_kms(base);
 	if(win->surface_type != swa_surface_gl) {
 		dlg_error("Window doesn't have gl surface");
 		return false;
@@ -546,7 +550,7 @@ static uint32_t fb_for_bo(struct gbm_bo* bo, uint32_t drm_format) {
 	return id;
 }
 
-static bool pageflip(struct drm_window* win, uint32_t fb_id,
+static bool pageflip(struct swa_window_kms* win, uint32_t fb_id,
 		uint64_t width, uint64_t height) {
 	drmModeAtomicReq* req = drmModeAtomicAlloc();
 	struct atomic atom = {req, false};
@@ -595,7 +599,7 @@ static bool pageflip(struct drm_window* win, uint32_t fb_id,
 
 static bool win_gl_swap_buffers(struct swa_window* base) {
 #ifdef SWA_WITH_GL
-	struct drm_window* win = get_window_drm(base);
+	struct swa_window_kms* win = get_window_kms(base);
 	if(win->surface_type != swa_surface_gl) {
 		dlg_error("Window doesn't have gl surface");
 		return false;
@@ -639,7 +643,7 @@ static bool win_gl_set_swap_interval(struct swa_window* base, int interval) {
 }
 
 static bool win_get_buffer(struct swa_window* base, struct swa_image* img) {
-	struct drm_window* win = get_window_drm(base);
+	struct swa_window_kms* win = get_window_kms(base);
 	if(win->surface_type != swa_surface_buffer) {
 		dlg_error("Cannot get buffer for non-buffer-surface window");
 		return false;
@@ -684,7 +688,7 @@ static bool win_get_buffer(struct swa_window* base, struct swa_image* img) {
 }
 
 static void win_apply_buffer(struct swa_window* base) {
-	struct drm_window* win = get_window_drm(base);
+	struct swa_window_kms* win = get_window_kms(base);
 	if(win->surface_type != swa_surface_buffer) {
 		dlg_error("Cannot apply buffer for non-buffer-surface window");
 		return;
@@ -730,7 +734,7 @@ static const struct swa_window_interface window_impl = {
 };
 
 // display
-static void drm_finish(struct drm_display* dpy) {
+static void drm_finish(struct swa_display_kms* dpy) {
 	// TODO: cleanup output data
 	free(dpy->drm.outputs);
 	for(unsigned i = 0u; i < dpy->drm.n_planes; ++i) {
@@ -745,7 +749,7 @@ static void drm_finish(struct drm_display* dpy) {
 }
 
 static void display_destroy(struct swa_display* base) {
-	struct drm_display* dpy = get_display_drm(base);
+	struct swa_display_kms* dpy = get_display_kms(base);
 
 	if(dpy->session.tty_fd) {
 		struct vt_mode mode = {
@@ -768,13 +772,13 @@ static void display_destroy(struct swa_display* base) {
 }
 
 static bool display_dispatch(struct swa_display* base, bool block) {
-	struct drm_display* dpy = get_display_drm(base);
+	struct swa_display_kms* dpy = get_display_kms(base);
 	pml_iterate(dpy->pml, block);
 	return !dpy->quit;
 }
 
 static void display_wakeup(struct swa_display* base) {
-	struct drm_display* dpy = get_display_drm(base);
+	struct swa_display_kms* dpy = get_display_kms(base);
 	int err = write(dpy->wakeup_pipe_w, " ", 1);
 
 	// if the pipe is full, the waiting thread will wake up and clear
@@ -785,7 +789,7 @@ static void display_wakeup(struct swa_display* base) {
 }
 
 static enum swa_display_cap display_capabilities(struct swa_display* base) {
-	struct drm_display* dpy = get_display_drm(base);
+	struct swa_display_kms* dpy = get_display_kms(base);
 	enum swa_display_cap caps =
 #ifdef SWA_WITH_GL
 		swa_display_cap_gl |
@@ -820,7 +824,7 @@ static const char** display_vk_extensions(struct swa_display* base, unsigned* co
 }
 
 static bool display_key_pressed(struct swa_display* base, enum swa_key key) {
-	struct drm_display* dpy = get_display_drm(base);
+	struct swa_display_kms* dpy = get_display_kms(base);
 	if(!dpy->input.keyboard.present) {
 		dlg_warn("display has no keyboard");
 		return false;
@@ -838,7 +842,7 @@ static bool display_key_pressed(struct swa_display* base, enum swa_key key) {
 }
 
 static const char* display_key_name(struct swa_display* base, enum swa_key key) {
-	struct drm_display* dpy = get_display_drm(base);
+	struct swa_display_kms* dpy = get_display_kms(base);
 	if(!dpy->input.keyboard.keymap) {
 		dlg_warn("display has no keyboard");
 		return NULL;
@@ -848,7 +852,7 @@ static const char* display_key_name(struct swa_display* base, enum swa_key key) 
 }
 
 static enum swa_keyboard_mod display_active_keyboard_mods(struct swa_display* base) {
-	struct drm_display* dpy = get_display_drm(base);
+	struct swa_display_kms* dpy = get_display_kms(base);
 	if(!dpy->input.keyboard.state) {
 		dlg_warn("display has no keyboard");
 		return swa_keyboard_mod_none;
@@ -858,7 +862,7 @@ static enum swa_keyboard_mod display_active_keyboard_mods(struct swa_display* ba
 }
 
 static struct swa_window* display_get_keyboard_focus(struct swa_display* base) {
-	struct drm_display* dpy = get_display_drm(base);
+	struct swa_display_kms* dpy = get_display_kms(base);
 	if(!dpy->input.keyboard.present) {
 		dlg_error("no keyboard present");
 		return NULL;
@@ -869,7 +873,7 @@ static struct swa_window* display_get_keyboard_focus(struct swa_display* base) {
 
 static bool display_mouse_button_pressed(struct swa_display* base,
 		enum swa_mouse_button button) {
-	struct drm_display* dpy = get_display_drm(base);
+	struct swa_display_kms* dpy = get_display_kms(base);
 	if(!dpy->input.pointer.present) {
 		dlg_warn("display has no mouse");
 		return NULL;
@@ -884,7 +888,7 @@ static bool display_mouse_button_pressed(struct swa_display* base,
 }
 
 static void display_mouse_position(struct swa_display* base, int* x, int* y) {
-	struct drm_display* dpy = get_display_drm(base);
+	struct swa_display_kms* dpy = get_display_kms(base);
 	dlg_assert(x && y);
 	if(!dpy->input.pointer.present) {
 		dlg_error("no pointer present");
@@ -896,7 +900,7 @@ static void display_mouse_position(struct swa_display* base, int* x, int* y) {
 }
 
 static struct swa_window* display_get_mouse_over(struct swa_display* base) {
-	struct drm_display* dpy = get_display_drm(base);
+	struct swa_display_kms* dpy = get_display_kms(base);
 	if(!dpy->input.pointer.present) {
 		dlg_error("no pointer present");
 		return NULL;
@@ -919,21 +923,52 @@ static bool display_start_dnd(struct swa_display* base,
 	return false;
 }
 
-static void win_send_draw(struct pml_defer* defer) {
-	struct drm_window* win = pml_defer_get_data(defer);
+static void win_get_size(struct swa_window_kms* win, unsigned* width,
+		unsigned* height) {
+	if(win->surface_type == swa_surface_vk) {
+#ifdef SWA_WITH_VK
+		swa_kms_vk_surface_get_size(win->vk, width, height);
+#else // SWA_WITH_VK
+		dlg_error("window has vulkan surface but swa was built without vulkan");
+		return;
+#endif // SWA_WITH_VK
+	} else if(win->output) {
+		*width = win->output->mode.hdisplay;
+		*height = win->output->mode.vdisplay;
+	} else {
+		dlg_error("Invalid window: neither vulkan window nor bound to drm output");
+		return;
+	}
+}
+
+static void win_handle_deferred(struct pml_defer* defer) {
+	struct swa_window_kms* win = pml_defer_get_data(defer);
 	pml_defer_enable(defer, false);
-	if(win->base.listener->draw) {
-		win->base.listener->draw(&win->base);
+
+	if(win->defer_events & swa_kms_defer_size) {
+		win->defer_events &= ~swa_kms_defer_size;
+		if(win->base.listener->resize) {
+			unsigned width, height;
+			win_get_size(win, &width, &height);
+			win->base.listener->resize(&win->base, width, height);
+		}
+	}
+
+	if(win->defer_events & swa_kms_defer_draw) {
+		win->defer_events &= ~swa_kms_defer_draw;
+		if(win->base.listener->draw) {
+			win->base.listener->draw(&win->base);
+		}
 	}
 }
 
 static void page_flip_handler(int fd, unsigned seq,
 		unsigned tv_sec, unsigned tv_usec, unsigned crtc_id, void *data) {
-	struct drm_display* dpy = data;
+	struct swa_display_kms* dpy = data;
 	dlg_assert(dpy);
 	dlg_assert(dpy->drm.fd);
 
-	struct drm_output* output = NULL;
+	struct swa_kms_output* output = NULL;
 	for(unsigned i = 0u; i < dpy->drm.n_outputs; ++i) {
 		if(dpy->drm.outputs[i].crtc.id == crtc_id) {
 			output = &dpy->drm.outputs[i];
@@ -953,7 +988,7 @@ static void page_flip_handler(int fd, unsigned seq,
 	}
 
 	// manage buffers
-	struct drm_window* win = output->window;
+	struct swa_window_kms* win = output->window;
 	if(win->surface_type == swa_surface_buffer) {
 		dlg_assert(win->buffer.pending);
 		dlg_assert(win->buffer.pending->in_use);
@@ -984,7 +1019,7 @@ static void page_flip_handler(int fd, unsigned seq,
 }
 
 static void drm_io(struct pml_io* io, unsigned revents) {
-	struct drm_display* dpy = pml_io_get_data(io);
+	struct swa_display_kms* dpy = pml_io_get_data(io);
 	drmEventContext event = {
 		.version = 3,
 		.page_flip_handler2 = page_flip_handler,
@@ -997,8 +1032,8 @@ static void drm_io(struct pml_io* io, unsigned revents) {
 	}
 }
 
-static bool output_init(struct drm_display* dpy,struct drm_output* output,
-		drmModeConnectorPtr connector) {
+static bool output_init(struct swa_display_kms* dpy,
+		struct swa_kms_output* output, drmModeConnectorPtr connector) {
 	bool success = false;
 
 	// Find the encoder (a deprecated KMS object) for this connector
@@ -1061,11 +1096,12 @@ static bool output_init(struct drm_display* dpy,struct drm_output* output,
 			dpy->drm.planes[p]->crtc_id,
 			dpy->drm.planes[p]->fb_id,
 			type);
+		/*
 		if(type == DRM_PLANE_TYPE_CURSOR && !output->cursor_plane.id) {
 				dlg_debug("  used as cursor plane");
 				output->cursor_plane.id = dpy->drm.planes[p]->plane_id;
 				output->cursor_plane.props = props;
-		} else if(type == DRM_PLANE_TYPE_PRIMARY && !output->primary_plane.id) {
+		} else */ if(type == DRM_PLANE_TYPE_PRIMARY && !output->primary_plane.id) {
 			if(dpy->drm.planes[p]->crtc_id == crtc->crtc_id &&
 					dpy->drm.planes[p]->fb_id == crtc->buffer_id) {
 				dlg_debug("  used as primary plane");
@@ -1125,7 +1161,7 @@ out_encoder:
 	return success;
 }
 
-static bool init_drm_dev(struct drm_display* dpy, const char* filename) {
+static bool init_drm_dev(struct swa_display_kms* dpy, const char* filename) {
 	dpy->drm.fd = open(filename, O_RDWR | O_CLOEXEC, 0);
 	if(dpy->drm.fd < 0) {
 		dlg_error("couldn't open %s: %s", filename, strerror(errno));
@@ -1202,7 +1238,7 @@ static bool init_drm_dev(struct drm_display* dpy, const char* filename) {
 	for(int i = 0; i < dpy->drm.res->count_connectors; i++) {
 		drmModeConnectorPtr connector =
 			drmModeGetConnector(dpy->drm.fd, dpy->drm.res->connectors[i]);
-		struct drm_output* output = &dpy->drm.outputs[dpy->drm.n_outputs];
+		struct swa_kms_output* output = &dpy->drm.outputs[dpy->drm.n_outputs];
 		if(!output_init(dpy, output, connector)) {
 			memset(output, 0x0, sizeof(*output));
 			continue;
@@ -1224,7 +1260,7 @@ error:
 	return false;
 }
 
-static bool init_drm(struct drm_display* dpy) {
+static bool init_drm(struct swa_display_kms* dpy) {
 	int n_devs = drmGetDevices2(0, NULL, 0);
 	if(n_devs == 0) {
 		dlg_error("no DRM devices available");
@@ -1269,7 +1305,7 @@ static bool init_drm(struct drm_display* dpy) {
 //   about vulkan. Maybe use surface created/destroyed to make
 //   sure it's not used? Or is it even a problem if used?
 static void sigusr_handler(struct pml_io* io, unsigned revents) {
-	struct drm_display* dpy = pml_io_get_data(io);
+	struct swa_display_kms* dpy = pml_io_get_data(io);
 	dlg_assert(pml_io_get_fd(io) == dpy->session.sigusrfd);
 	dlg_debug("Received SIGUSR1");
 
@@ -1317,7 +1353,8 @@ static void sigusr_handler(struct pml_io* io, unsigned revents) {
 					continue;
 				}
 
-				pml_defer_enable(dpy->drm.outputs[i].window->defer_draw, true);
+				dpy->drm.outputs[i].window->defer_events |= swa_kms_defer_draw;
+				pml_defer_enable(dpy->drm.outputs[i].window->defer, true);
 				struct swa_window* base = &dpy->drm.outputs[i].window->base;
 				if(base->listener->focus) {
 					base->listener->focus(base, true);
@@ -1330,7 +1367,7 @@ static void sigusr_handler(struct pml_io* io, unsigned revents) {
 }
 
 static void sigterm_handler(struct pml_io* io, unsigned revents) {
-	struct drm_display* dpy = pml_io_get_data(io);
+	struct swa_display_kms* dpy = pml_io_get_data(io);
 	dlg_assert(pml_io_get_fd(io) == dpy->session.sigtermfd);
 	dlg_info("Received SIGTERM");
 
@@ -1347,7 +1384,7 @@ static void sigterm_handler(struct pml_io* io, unsigned revents) {
 	dpy->quit = true;
 }
 
-static int vt_setup(struct drm_display* dpy) {
+static int vt_setup(struct swa_display_kms* dpy) {
 	const char *tty_num_env = getenv("TTYNO");
 	int tty_num = 0;
 	char tty_dev[32];
@@ -1504,9 +1541,9 @@ static int vt_setup(struct drm_display* dpy) {
 
 static struct swa_window* display_create_window(struct swa_display* base,
 		const struct swa_window_settings* settings) {
-	struct drm_display* dpy = get_display_drm(base);
+	struct swa_display_kms* dpy = get_display_kms(base);
 
-	struct drm_window* win = calloc(1, sizeof(*win));
+	struct swa_window_kms* win = calloc(1, sizeof(*win));
 	win->base.impl = &window_impl;
 	win->base.listener = settings->listener;
 	win->dpy = dpy;
@@ -1529,7 +1566,7 @@ static struct swa_window* display_create_window(struct swa_display* base,
 		}
 
 		VkInstance instance = (VkInstance) settings->surface_settings.vk.instance;
-		if(!(win->vk = drm_vk_surface_create(dpy->pml, instance, &win->base))) {
+		if(!(win->vk = swa_kms_vk_surface_create(dpy->pml, instance, &win->base))) {
 			goto error;
 		}
 
@@ -1550,7 +1587,7 @@ static struct swa_window* display_create_window(struct swa_display* base,
 
 		// Just create it on any free output.
 		// If there aren't any remaning outputs, fail
-		struct drm_output* output = NULL;
+		struct swa_kms_output* output = NULL;
 		for(unsigned i = 0u; i < dpy->drm.n_outputs; ++i) {
 			if(!dpy->drm.outputs[i].window) {
 				output = &dpy->drm.outputs[i];
@@ -1625,10 +1662,12 @@ static struct swa_window* display_create_window(struct swa_display* base,
 
 	win_set_cursor(&win->base, settings->cursor);
 
-	// TODO: also send initial size event
 	// queue initial events
-	win->defer_draw = pml_defer_new(dpy->pml, win_send_draw);
-	pml_defer_set_data(win->defer_draw, win);
+	// TODO: only defer size event when we don't use requested size
+	//  fix used video mode
+	win->defer_events = swa_kms_defer_draw | swa_kms_defer_size;
+	win->defer = pml_defer_new(dpy->pml, win_handle_deferred);
+	pml_defer_set_data(win->defer, win);
 
 	// TODO: hacky! fix for multi monitor support
 	if(dpy->input.pointer.present && !dpy->input.pointer.over) {
@@ -1665,7 +1704,7 @@ static const struct swa_display_interface display_impl = {
 };
 
 static void udev_io(struct pml_io* io, unsigned revents) {
-	struct drm_display* dpy = pml_io_get_data(io);
+	struct swa_display_kms* dpy = pml_io_get_data(io);
 	struct udev_device *udev_dev = udev_monitor_receive_device(dpy->udev_monitor);
 	if(!udev_dev) {
 		return;
@@ -1687,7 +1726,7 @@ out:
 	udev_device_unref(udev_dev);
 }
 
-static bool init_udev(struct drm_display* dpy) {
+static bool init_udev(struct swa_display_kms* dpy) {
 	dpy->udev = udev_new();
 	if(!dpy->udev) {
 		dlg_error("Failed to init udev");
@@ -1731,7 +1770,7 @@ static const struct libinput_interface libinput_impl = {
 	.close_restricted = libinput_close_restricted
 };
 
-static bool init_xkb(struct drm_display* dpy) {
+static bool init_xkb(struct swa_display_kms* dpy) {
 	struct xkb_rule_names rules = { 0 };
 	struct xkb_context* context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 	dpy->input.keyboard.keymap = xkb_map_new_from_names(context, &rules,
@@ -1750,7 +1789,7 @@ static bool init_xkb(struct drm_display* dpy) {
 	return true;
 }
 
-static void handle_device_added(struct drm_display* dpy,
+static void handle_device_added(struct swa_display_kms* dpy,
 		struct libinput_device* dev) {
 	int vendor = libinput_device_get_id_vendor(dev);
 	int product = libinput_device_get_id_product(dev);
@@ -1772,7 +1811,7 @@ static void handle_device_added(struct drm_display* dpy,
 	}
 }
 
-static bool check_binding(struct drm_display* dpy, xkb_keysym_t sym) {
+static bool check_binding(struct swa_display_kms* dpy, xkb_keysym_t sym) {
 	// TODO: probably the wrong place for this.
 	// We should inhibit all input when not active...
 	if(!dpy->session.active) {
@@ -1791,7 +1830,7 @@ static bool check_binding(struct drm_display* dpy, xkb_keysym_t sym) {
 	return false;
 }
 
-static void handle_keyboard_key(struct drm_display* dpy,
+static void handle_keyboard_key(struct swa_display_kms* dpy,
 		struct libinput_event* event) {
 	struct libinput_event_keyboard* kbevent = libinput_event_get_keyboard_event(event);
 	uint32_t keycode = libinput_event_keyboard_get_key(kbevent);
@@ -1837,7 +1876,7 @@ static void handle_keyboard_key(struct drm_display* dpy,
 	xkb_state_update_key(dpy->input.keyboard.state, xkb_keycode,
 		pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
 
-	struct drm_window* focus = dpy->input.keyboard.focus;
+	struct swa_window_kms* focus = dpy->input.keyboard.focus;
 	if(focus && focus->base.listener->key) {
 		char buf[8] = {0};
 		const char* utf8 = NULL;
@@ -1858,17 +1897,17 @@ static void handle_keyboard_key(struct drm_display* dpy,
 	// TODO: manually trigger repeat events via a timer
 }
 
-static void update_cursor_position(struct drm_display* dpy) {
+static void update_cursor_position(struct swa_display_kms* dpy) {
+	// TODO: fix for vulkan
 	if(!dpy->input.pointer.over ||
 			!dpy->input.pointer.over->output ||
-			!dpy->input.pointer.over->output->cursor_plane.id ||
+			// !dpy->input.pointer.over->output->cursor_plane.id ||
 			!dpy->input.pointer.over->cursor.buffer.buffer.fb_id) {
 		return;
 	}
 
-
-	struct drm_window* win = dpy->input.pointer.over;
-	struct drm_output* output = win->output;
+	struct swa_window_kms* win = dpy->input.pointer.over;
+	struct swa_kms_output* output = win->output;
 
 	int32_t x = win->dpy->input.pointer.x - win->cursor.buffer.hx;
 	int32_t y = win->dpy->input.pointer.y - win->cursor.buffer.hy;
@@ -1876,7 +1915,7 @@ static void update_cursor_position(struct drm_display* dpy) {
 	dlg_assertm(!err, "drmModeMoveCursor: %s", strerror(errno));
 }
 
-static void handle_pointer_motion(struct drm_display* dpy,
+static void handle_pointer_motion(struct swa_display_kms* dpy,
 		struct libinput_event* base_ev) {
 	struct libinput_event_pointer* ev =
 		libinput_event_get_pointer_event(base_ev);
@@ -1892,7 +1931,7 @@ static void handle_pointer_motion(struct drm_display* dpy,
 		return;
 	}
 
-	struct drm_window* over = dpy->input.pointer.over;
+	struct swa_window_kms* over = dpy->input.pointer.over;
 	if(over && over->base.listener->mouse_move) {
 		struct swa_mouse_move_event ev = {
 			.x = (int) dpy->input.pointer.x,
@@ -1906,7 +1945,7 @@ static void handle_pointer_motion(struct drm_display* dpy,
 	update_cursor_position(dpy);
 }
 
-static void handle_pointer_motion_abs(struct drm_display* dpy,
+static void handle_pointer_motion_abs(struct swa_display_kms* dpy,
 		struct libinput_event* base_ev) {
 	struct libinput_event_pointer* ev =
 		libinput_event_get_pointer_event(base_ev);
@@ -1924,7 +1963,7 @@ static void handle_pointer_motion_abs(struct drm_display* dpy,
 		return;
 	}
 
-	struct drm_window* over = dpy->input.pointer.over;
+	struct swa_window_kms* over = dpy->input.pointer.over;
 	if(over && over->base.listener->mouse_move) {
 		struct swa_mouse_move_event ev = {
 			.x = (int) dpy->input.pointer.x,
@@ -1952,7 +1991,7 @@ static enum swa_mouse_button linux_to_button(uint32_t buttoncode) {
 	}
 }
 
-static void handle_pointer_button(struct drm_display* dpy,
+static void handle_pointer_button(struct swa_display_kms* dpy,
 		struct libinput_event* base_ev) {
 	struct libinput_event_pointer* ev =
 		libinput_event_get_pointer_event(base_ev);
@@ -1970,7 +2009,7 @@ static void handle_pointer_button(struct drm_display* dpy,
 		return;
 	}
 
-	struct drm_window* over = dpy->input.pointer.over;
+	struct swa_window_kms* over = dpy->input.pointer.over;
 	uint32_t linux_button = libinput_event_pointer_get_button(ev);
 	enum swa_mouse_button button = linux_to_button(linux_button);
 
@@ -1991,7 +2030,7 @@ static void handle_pointer_button(struct drm_display* dpy,
 	}
 }
 
-static void handle_libinput_event(struct drm_display* dpy,
+static void handle_libinput_event(struct swa_display_kms* dpy,
 		struct libinput_event* event) {
 	struct libinput_device* libinput_dev = libinput_event_get_device(event);
 	enum libinput_event_type event_type = libinput_event_get_type(event);
@@ -2035,7 +2074,7 @@ static void handle_libinput_event(struct drm_display* dpy,
 }
 
 static void libinput_io(struct pml_io* io, unsigned revents) {
-	struct drm_display* dpy = pml_io_get_data(io);
+	struct swa_display_kms* dpy = pml_io_get_data(io);
 	if(libinput_dispatch(dpy->input.context) != 0) {
 		dlg_error("Failed to dispatch libinput");
 		return;
@@ -2058,6 +2097,12 @@ static void log_libinput(struct libinput *libinput_context,
 	}
 
 	buf[count] = '\0';
+
+	// strip newline
+	if(buf[count - 1] == '\n') {
+		buf[count - 1] = '\0';
+	}
+
 	enum dlg_level lvl = dlg_level_error;
 	switch(priority) {
 		case LIBINPUT_LOG_PRIORITY_DEBUG:
@@ -2076,7 +2121,7 @@ static void log_libinput(struct libinput *libinput_context,
 	dlg_log(lvl, "libinput: %s", buf);
 }
 
-static bool init_libinput(struct drm_display* dpy) {
+static bool init_libinput(struct swa_display_kms* dpy) {
 	dpy->input.context = libinput_udev_create_context(&libinput_impl,
 		dpy, dpy->udev);
 	if(!dpy->input.context) {
@@ -2130,8 +2175,10 @@ static void clear_wakeup(struct pml_io* io, unsigned revents) {
 // TODO: we somehow have to make sure that display creation
 // fails when we wouldn't have enough rights.
 // Not sure how to test that though.
-struct swa_display* drm_display_create(void) {
-	struct drm_display* dpy = calloc(1, sizeof(*dpy));
+struct swa_display* swa_display_kms_create(const char* appname) {
+	(void) appname;
+
+	struct swa_display_kms* dpy = calloc(1, sizeof(*dpy));
 	dpy->base.impl = &display_impl;
 	dpy->pml = pml_new();
 

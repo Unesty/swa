@@ -1,16 +1,13 @@
 #pragma once
 
-#include <swa/impl.h>
-#include <swa/xkb.h>
+#include <swa/private/impl.h>
+#include <swa/private/xkb.h>
 #include <stdint.h>
 #include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-typedef void* EGLSurface;
-typedef void* EGLContext;
 
 struct swa_display_wl {
 	struct swa_display base;
@@ -71,6 +68,9 @@ struct swa_display_wl {
 		uint32_t serial;
 	} dnd;
 
+	// We have to keep track of touch points to know on which
+	// window the touch points are located. That information is only
+	// sent from wayland when a new touch point is created.
 	unsigned capacity_touch_points;
 	unsigned n_touch_points;
 	struct swa_wl_touch_point* touch_points;
@@ -107,13 +107,13 @@ struct swa_wl_buffer_surface {
 };
 
 struct swa_wl_gl_surface {
-	EGLSurface surface;
-	EGLContext context;
+	void* surface;
+	void* context;
 	struct wl_egl_window* egl_window;
 };
 
 struct swa_wl_vk_surface {
-	uint64_t instance;
+	uintptr_t instance;
 	uint64_t surface;
 };
 
@@ -121,7 +121,7 @@ struct swa_window_wl {
 	struct swa_window base;
 	struct swa_display_wl* dpy;
 
-	struct wl_surface* surface;
+	struct wl_surface* wl_surface;
 	struct xdg_surface* xdg_surface;
 	struct xdg_toplevel* xdg_toplevel;
 	struct zxdg_toplevel_decoration_v1* decoration;
@@ -185,6 +185,7 @@ struct swa_data_offer_wl {
 	} data;
 };
 
+// public api
 struct swa_display* swa_display_wl_create(const char* appname);
 
 #ifdef __cplusplus

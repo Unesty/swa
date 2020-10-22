@@ -2,11 +2,22 @@
 #include <swa/key.h>
 #include <dlg/dlg.h>
 #include <string.h>
+#include <stdlib.h>
+
 // this is important as a msvc workaround: their gl.h header is
 // broken windows.h has to be included first (which is pulled by stdlib.h)
 // Thanks Bill!
-#include <stdlib.h>
-#include <GL/gl.h>
+#ifdef _WIN32
+  #include <windows.h>
+#endif
+
+#ifdef __ANDROID__
+  #include <GLES2/gl2.h>
+#else
+  #include <GL/gl.h>
+#endif
+
+#define GL_FRAMEBUFFER_SRGB 0x8DB9
 
 static bool run = true;
 static bool premult = false;
@@ -14,9 +25,9 @@ static bool premult = false;
 static void window_draw(struct swa_window* win) {
 	dlg_info("draw");
 
-	float alpha = 0.1;
+	float alpha = 0.1f;
 	float mult = premult ? alpha : 1.f;
-	glClearColor(mult * 0.8, mult * 0.6, mult * 0.3, alpha);
+	glClearColor(mult * 0.8f, mult * 0.6f, mult * 0.3f, alpha);
 	glClear(GL_COLOR_BUFFER_BIT);
 	if(!swa_window_gl_swap_buffers(win)) {
 		dlg_error("swa_window_gl_swap_buffers failed");
@@ -47,11 +58,17 @@ static void window_key(struct swa_window* win, const struct swa_key_event* ev) {
 	}
 }
 
+static void window_surface_created(struct swa_window* win) {
+	bool ret = swa_window_gl_make_current(win);
+	dlg_assert(ret);
+}
+
 static const struct swa_window_listener window_listener = {
 	.draw = window_draw,
 	.mouse_button = window_mouse_button,
 	.close = window_close,
 	.key = window_key,
+	.surface_created = window_surface_created
 };
 
 int main() {
@@ -71,9 +88,15 @@ int main() {
 	settings.cursor = cursor;
 	settings.transparent = true;
 	settings.surface = swa_surface_gl;
+#ifdef __ANDROID__
+	settings.surface_settings.gl.major = 2;
+	settings.surface_settings.gl.minor = 0;
+	settings.surface_settings.gl.api = swa_api_gles;
+#else
 	settings.surface_settings.gl.major = 4;
 	settings.surface_settings.gl.minor = 0;
 	settings.surface_settings.gl.api = swa_api_gl;
+#endif
 	// settings.surface_settings.gl.srgb = true;
 	// settings.surface_settings.gl.debug = true;
 	// settings.surface_settings.gl.compatibility = false;

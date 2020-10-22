@@ -5,7 +5,7 @@
 #include <time.h>
 
 static bool run = true;
-struct timespec last_redraw;
+// struct timespec last_redraw;
 
 static void window_draw(struct swa_window* win) {
 	struct swa_image img;
@@ -13,14 +13,13 @@ static void window_draw(struct swa_window* win) {
 		return;
 	}
 
-	struct timespec now;
+	// struct timespec now;
 	// clock_gettime(CLOCK_MONOTONIC, &now);
-	timespec_get(&now, TIME_UTC);
-	float ms = (now.tv_nsec - last_redraw.tv_nsec) / (1000.f * 1000.f);
-	ms += 1000.f * (now.tv_sec - last_redraw.tv_sec);
-	dlg_info("Time between redraws: %f", ms);
-	last_redraw = now;
-
+	// timespec_get(&now, TIME_UTC);
+	// float ms = (now.tv_nsec - last_redraw.tv_nsec) / (1000.f * 1000.f);
+	// ms += 1000.f * (now.tv_sec - last_redraw.tv_sec);
+	// dlg_info("Time between redraws: %f", ms);
+	// last_redraw = now;
 	dlg_info("drawing window, size: %d %d", img.width, img.height);
 
 	/*
@@ -44,7 +43,7 @@ static void window_draw(struct swa_window* win) {
 	memset(img.data, 255, size);
 
 	swa_window_apply_buffer(win);
-	swa_window_refresh(win);
+	// swa_window_refresh(win);
 }
 
 static void window_close(struct swa_window* win) {
@@ -52,8 +51,6 @@ static void window_close(struct swa_window* win) {
 }
 
 static void window_key(struct swa_window* win, const struct swa_key_event* ev) {
-	dlg_trace("key: %d %d, utf8: %s", ev->keycode, ev->pressed,
-		ev->utf8 ? ev->utf8 : "<null>");
 	if(ev->pressed && ev->keycode == swa_key_escape) {
 		dlg_info("Escape pressed, exiting");
 		run = false;
@@ -92,7 +89,7 @@ int main() {
 	}
 
 	swa_window_set_userdata(win, dpy);
-	timespec_get(&last_redraw, TIME_UTC);
+	// timespec_get(&last_redraw, TIME_UTC);
 
 	while(run) {
 		if(!swa_display_dispatch(dpy, true)) {
