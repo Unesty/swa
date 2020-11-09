@@ -217,13 +217,13 @@ static void window_resize(struct swa_window* win, unsigned w, unsigned h) {
 	VkSurfaceCapabilitiesKHR caps;
 	VkResult res = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(state->phdev,
 		state->surface, &caps);
-	if (res != VK_SUCCESS) {
+	if(res != VK_SUCCESS) {
 		vk_error(res, "failed retrieve surface caps");
 		run = false;
 		return;
 	}
 
-	if (caps.currentExtent.width == 0xFFFFFFFFu) {
+	if(caps.currentExtent.width == 0xFFFFFFFFu) {
 		state->swapchain_info.imageExtent.width = w;
 		state->swapchain_info.imageExtent.height = h;
 	} else {
@@ -240,7 +240,7 @@ static void window_resize(struct swa_window* win, unsigned w, unsigned h) {
 		state->swapchain_info.oldSwapchain, NULL);
 	state->swapchain_info.oldSwapchain = VK_NULL_HANDLE;
 
-	if (res != VK_SUCCESS) {
+	if(res != VK_SUCCESS) {
 		vk_error(res, "Failed to create vk swapchain");
 		run = false;
 		return;
@@ -386,7 +386,7 @@ static bool has_extension(const VkExtensionProperties *avail,
 		uint32_t availc, const char *req) {
 	// check if all required extensions are supported
 	for (size_t j = 0; j < availc; ++j) {
-		if (!strcmp(avail[j].extensionName, req)) {
+		if(!strcmp(avail[j].extensionName, req)) {
 			return true;
 		}
 	}
@@ -416,9 +416,9 @@ static VkBool32 debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
 		"VUID-VkSwapchainCreateInfoKHR-imageExtent-01274"
 	};
 
-	if (debug_data->pMessageIdName) {
+	if(debug_data->pMessageIdName) {
 		for (unsigned i = 0; i < sizeof(ignored) / sizeof(ignored[0]); ++i) {
-			if (!strcmp(debug_data->pMessageIdName, ignored[i])) {
+			if(!strcmp(debug_data->pMessageIdName, ignored[i])) {
 				return false;
 			}
 		}
@@ -441,22 +441,22 @@ static VkBool32 debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
 			break;
 	}
 
-	if (debug_data->queueLabelCount > 0) {
+	if(debug_data->queueLabelCount > 0) {
 		const char *name = debug_data->pQueueLabels[0].pLabelName;
-		if (name) {
+		if(name) {
 			dlg_debug("    last queue label '%s'", name);
 		}
 	}
 
-	if (debug_data->cmdBufLabelCount > 0) {
+	if(debug_data->cmdBufLabelCount > 0) {
 		const char *name = debug_data->pCmdBufLabels[0].pLabelName;
-		if (name) {
+		if(name) {
 			dlg_debug("    last cmdbuf label '%s'", name);
 		}
 	}
 
 	for (unsigned i = 0; i < debug_data->objectCount; ++i) {
-		if (debug_data->pObjects[i].pObjectName) {
+		if(debug_data->pObjects[i].pObjectName) {
 			dlg_debug("    involving '%s'", debug_data->pMessage);
 		}
 	}
@@ -499,7 +499,7 @@ static bool init_render_buffers(struct state* state) {
 
 	res = vkGetSwapchainImagesKHR(dev, state->swapchain,
 		&state->n_bufs, NULL);
-	if (res != VK_SUCCESS) {
+	if(res != VK_SUCCESS) {
 		vk_error(res, "Failed to get swapchain images (1)");
 		return false;
 	}
@@ -507,7 +507,7 @@ static bool init_render_buffers(struct state* state) {
 	VkImage* images = calloc(state->n_bufs, sizeof(*images));
 	res = vkGetSwapchainImagesKHR(dev, state->swapchain,
 		&state->n_bufs, images);
-	if (res != VK_SUCCESS) {
+	if(res != VK_SUCCESS) {
 		vk_error(res, "Failed to get swapchain images (2)");
 		return false;
 	}
@@ -534,7 +534,7 @@ static bool init_render_buffers(struct state* state) {
 		view_info.image = images[i];
 
 		res = vkCreateImageView(dev, &view_info, NULL, &state->bufs[i].iv);
-		if (res != VK_SUCCESS) {
+		if(res != VK_SUCCESS) {
 			vk_error(res, "vkCreateImageView");
 			goto end_images;
 		}
@@ -550,7 +550,7 @@ static bool init_render_buffers(struct state* state) {
 		fb_info.layers = 1;
 
 		res = vkCreateFramebuffer(dev, &fb_info, NULL, &buf->fb);
-		if (res != VK_SUCCESS) {
+		if(res != VK_SUCCESS) {
 			vk_error(res, "vkCreateFramebuffer");
 			goto end_images;
 		}
@@ -567,7 +567,7 @@ static bool init_render_buffers(struct state* state) {
 	cmd_buf_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 	cmd_buf_info.commandBufferCount = state->n_bufs;
 	res = vkAllocateCommandBuffers(dev, &cmd_buf_info, cbs);
-	if (res != VK_SUCCESS) {
+	if(res != VK_SUCCESS) {
 		vk_error(res, "vkAllocateCommandBuffers");
 		goto end_cbs;
 	}
@@ -770,12 +770,12 @@ static bool init_swapchain(struct state* state, unsigned width, unsigned height)
 	bool vsync = false;
 	if(!vsync) {
 		for (size_t i = 0; i < present_mode_count; i++) {
-			if (present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
+			if(present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
 				info->presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
 				break;
-			} else if (present_modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+			} else if(present_modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) {
 				info->presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
-			} else if (present_modes[i] == VK_PRESENT_MODE_FIFO_RELAXED_KHR) {
+			} else if(present_modes[i] == VK_PRESENT_MODE_FIFO_RELAXED_KHR) {
 				info->presentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
 			}
 		}
@@ -813,7 +813,7 @@ static bool init_swapchain(struct state* state, unsigned width, unsigned height)
 	};
 
 	for(int i = 0; i < 4; ++i) {
-		if (caps.supportedCompositeAlpha & alpha_flags[i]) {
+		if(caps.supportedCompositeAlpha & alpha_flags[i]) {
 			alpha = alpha_flags[i];
 			break;
 		}
